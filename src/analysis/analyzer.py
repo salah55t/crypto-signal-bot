@@ -45,22 +45,19 @@ class MarketAnalyzer:
         try:
             from src.core.binance_client import binance_client
             tickers = binance_client.get_all_tickers()
-            # Filter: USDT pairs, with sufficient 24h volume, not excluded
-            pairs = [
-                t["symbol"] for t in tickers
-                if t.get("symbol", "").endswith("USDT")
-                and float(t.get("quoteVolume", 0)) >= settings.MIN_VOLUME_USDT
-                and t.get("symbol") not in self.excluded
-            ]
-            # Sort by volume desc, then cap to MAX_SYMBOLS
-            tickers.sort(key=lambda t: float(t.get("quoteVolume", 0)), reverse=True)
-            sorted_pairs = [
-                t["symbol"] for t in tickers
-                if t.get("symbol", "").endswith("USDT")
-                and float(t.get("quoteVolume", 0)) >= settings.MIN_VOLUME_USDT
-                and t.get("symbol") not in self.excluded
-            ]
-            return sorted_pairs[:settings.MAX_SYMBOLS]
+            # Single pass: USDT pairs with sufficient volume, not excluded,
+            # sorted by 24h quote volume (descending), capped at MAX_SYMBOLS.
+            sorted_pairs = sorted(
+                (
+                    t for t in tickers
+                    if t.get("symbol", "").endswith("USDT")
+                    and float(t.get("quoteVolume", 0)) >= settings.MIN_VOLUME_USDT
+                    and t.get("symbol") not in self.excluded
+                ),
+                key=lambda t: float(t.get("quoteVolume", 0)),
+                reverse=True,
+            )
+            return [t["symbol"] for t in sorted_pairs[:settings.MAX_SYMBOLS]]
         except Exception as e:
             log.error(f"Failed to fetch USDT pairs: {e}")
             # Fallback to static list
@@ -163,16 +160,24 @@ class MarketAnalyzer:
 
         # === BOOST MECHANISM: Integrate Bottom Scanner candidates ===
         # The bottom scanner finds coins at recent lows with strong bounce signals.
-        # We merge these into the recommendations to ensure they become tradeable.
+        # SAFETY RULES (v2):
+        #   - Only candidates with bounce score >= 60 (was 50 - too loose)
+        #   - Confirmed only if the last candle closed bullish (no falling knives)
+        #   - Max 2 boosted entries per cycle (they compete with real signals)
+        #   - Confidence capped at 72 so genuine strategy signals rank first
+        strong_bottoms = []
         try:
             from src.analysis.bottom_scanner import bottom_scanner
             log.info("[cyan]Running bottom scanner for boost mechanism...[/]")
             bottom_candidates = bottom_scanner.scan(max_candidates=20, limit=200)
-            # Only include candidates with strong bounce score (>= 50)
-            strong_bottoms = [c for c in bottom_candidates if c.get("score", 0) >= 50]
+            strong_bottoms = [
+                c for c in bottom_candidates
+                if c.get("score", 0) >= 60
+                and c.get("last_candle_bullish", False)
+            ]
             log.info(
-                f"[green]{len(strong_bottoms)} strong bottom candidates found[/] "
-                f"(score >= 50)"
+                f"[green]{len(strong_bottoms)} confirmed bottom candidates[/] "
+                f"(score >= 60 + bullish close)"
             )
 
             # === Log bottom candidates to database ===
@@ -186,38 +191,45 @@ class MarketAnalyzer:
             existing_symbols = {r.get("symbol") for r in filtered}
             boosted = 0
             for c in strong_bottoms:
-                if c["symbol"] not in existing_symbols:
-                    # Convert bottom candidate to recommendation format
-                    rec = {
-                        "symbol": c["symbol"],
+                if boosted >= 2:
+                    break
+                if c["symbol"] in existing_symbols:
+                    continue
+                # Convert bottom candidate to recommendation format
+                confidence = min(72.0, 45.0 + c["score"] / 3)
+                rec = {
+                    "symbol": c["symbol"],
+                    "direction": "bullish",
+                    "weighted_score": float(c["score"]),
+                    "confidence": confidence,
+                    "current_price": c["current_price"],
+                    "expected_rise_pct": max(settings.MIN_EXPECTED_RISE,
+                                              c["atr_pct"] * 1.8),  # ~1.8x ATR
+                    "stop_loss": c["stop_loss"],
+                    "take_profit": c["take_profit"],
+                    "risk_reward_ratio": c["risk_reward_ratio"],
+                    "atr": float(c.get("atr_pct", 0) * c["current_price"] / 100),
+                    "atr_pct": c["atr_pct"],
+                    "signals": [{
+                        "strategy": "bottom_scanner_boost",
                         "direction": "bullish",
-                        "weighted_score": float(c["score"]),
-                        "confidence": min(85.0, 50.0 + c["score"] / 2),  # 50-85% confidence
-                        "current_price": c["current_price"],
-                        "expected_rise_pct": max(settings.MIN_EXPECTED_RISE,
-                                                  c["atr_pct"] * 2),  # at least 2x ATR
-                        "stop_loss": c["stop_loss"],
-                        "take_profit": c["take_profit"],
-                        "risk_reward_ratio": c["risk_reward_ratio"],
-                        "atr": float(c.get("atr_pct", 0) * c["current_price"] / 100),
-                        "atr_pct": c["atr_pct"],
-                        "signals": [{
-                            "strategy": "bottom_scanner_boost",
-                            "direction": "bullish",
-                            "score": c["score"],
-                            "confidence": min(85.0, 50.0 + c["score"] / 2) / 100,
-                            "reasons": c.get("signals", []),
-                            "details": {
-                                "bounce_score": c["score"],
-                                "recent_low": c.get("recent_low"),
-                                "distance_from_low_pct": c.get("distance_from_low_pct"),
-                                "patterns_detected": c.get("patterns_detected", []),
-                            }
-                        }],
-                        "timeframe": settings.TIMEFRAMES[0] if settings.TIMEFRAMES else "15m",
-                        "analyzed_at": c.get("analyzed_at"),
-                        "boosted_from_bottom": True,
-                    }
+                        "score": c["score"],
+                        "confidence": confidence / 100,
+                        "reasons": c.get("signals", []),
+                        "details": {
+                            "bounce_score": c["score"],
+                            "recent_low": c.get("recent_low"),
+                            "distance_from_low_pct": c.get("distance_from_low_pct"),
+                            "patterns_detected": c.get("patterns_detected", []),
+                        }
+                    }],
+                    "timeframe": settings.TIMEFRAMES[0] if settings.TIMEFRAMES else "15m",
+                    "analyzed_at": c.get("analyzed_at"),
+                    "boosted_from_bottom": True,
+                }
+                # Boosted entries must pass the SAME confidence + R/R filters
+                if (rec["confidence"] >= settings.MIN_CONFIDENCE
+                        and rec["risk_reward_ratio"] >= settings.MIN_RR_RATIO):
                     filtered.append(rec)
                     boosted += 1
             if boosted:

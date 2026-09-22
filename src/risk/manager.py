@@ -104,6 +104,10 @@ class RiskManager:
         if not self.can_open_position():
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
 
+        # Duplicate-symbol guard (second line of defense)
+        if settings.SKIP_DUPLICATE_SYMBOLS and self.has_open_position(rec["symbol"]):
+            return {"status": "rejected", "reasons": [f"{rec['symbol']} already has an open position"]}
+
         entry = rec["current_price"]
         sl = rec["stop_loss"]
         # Use fixed $10 trade amount (configurable via TRADE_AMOUNT_USD)
@@ -180,6 +184,8 @@ class RiskManager:
             return {"status": "rejected", "reasons": reasons}
         if not self.can_open_position():
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
+        if settings.SKIP_DUPLICATE_SYMBOLS and self.has_open_position(rec["symbol"]):
+            return {"status": "rejected", "reasons": [f"{rec['symbol']} already has an open position"]}
 
         symbol = rec["symbol"]
         entry = rec["current_price"]
@@ -425,17 +431,24 @@ class RiskManager:
             return {"status": "updated", "position": pos, "update": update_record}
         return {"status": "no_change"}
 
+    def has_open_position(self, symbol: str) -> bool:
+        """Check if a position is already open for the given symbol."""
+        return any(p.get("symbol") == symbol for p in self.open_positions)
+
     def apply_trailing_logic(self, current_prices: Dict[str, float],
                               market_signals: Dict[str, Dict] = None) -> List[Dict]:
         """
         Apply dynamic SL/TP adjustment based on price movement and market signals.
 
-        Trailing Stop Logic (for LONG positions):
-          - +1% profit: move SL to entry price (break-even)
-          - +2% profit: move SL to +1% (lock profit)
-          - +3% profit: move SL to +2% (lock more profit)
-          - On bearish signal (MACD cross down, RSI > 70, divergence): tighten SL closer
-          - On strong bullish continuation: extend TP higher (using ATR)
+        Trailing Stop Ladder (for LONG positions) - v2 jumps DIRECTLY to the
+        highest level reached (the old elif-chain lagged one level per cycle,
+        so it never caught up with fast pumps on 10-minute cycles):
+          - +1.0% profit: SL -> entry (break-even)
+          - +2.0% profit: SL -> +1.0%
+          - +3.0% profit: SL -> +2.0%
+          - +5.0%+ profit: SL trails 1% below current price
+          - On bearish signal (conf > 60): tighten SL to 0.5% below current
+          - On strong bullish continuation (conf > 80): extend TP higher
         """
         updates = []
         market_signals = market_signals or {}
@@ -454,42 +467,41 @@ class RiskManager:
             else:
                 profit_pct = (entry - current) / entry * 100
 
-            # Trailing logic
             new_sl = None
             new_tp = None
             reason = ""
 
             if pos["direction"] == "bullish":
-                # Break-even: at +1% profit, move SL to entry
-                if profit_pct >= 1.0 and current_sl < entry:
-                    new_sl = entry
-                    reason = f"Break-even (profit +{profit_pct:.2f}%)"
-                # Lock profit: at +2%, move SL to +1%
-                elif profit_pct >= 2.0 and current_sl < entry * 1.01:
-                    new_sl = entry * 1.01
-                    reason = f"Lock +1% profit (current +{profit_pct:.2f}%)"
-                # Lock more: at +3%, move SL to +2%
-                elif profit_pct >= 3.0 and current_sl < entry * 1.02:
-                    new_sl = entry * 1.02
+                # --- Trailing ladder: compute TARGET SL for the profit level,
+                # then take the max(target, current_sl) so we always jump
+                # straight to the highest earned level.
+                target_sl = None
+                if profit_pct >= 5.0:
+                    target_sl = current * 0.99   # trail 1% below price
+                    reason = f"Trailing stop (profit +{profit_pct:.2f}%)"
+                elif profit_pct >= 3.0:
+                    target_sl = entry * 1.02
                     reason = f"Lock +2% profit (current +{profit_pct:.2f}%)"
-                # Trailing: at +5%, move SL to 1% below current price
-                elif profit_pct >= 5.0:
-                    trailing_sl = current * 0.99
-                    if trailing_sl > current_sl:
-                        new_sl = trailing_sl
-                        reason = f"Trailing stop (current +{profit_pct:.2f}%)"
+                elif profit_pct >= 2.0:
+                    target_sl = entry * 1.01
+                    reason = f"Lock +1% profit (current +{profit_pct:.2f}%)"
+                elif profit_pct >= 1.0:
+                    target_sl = entry
+                    reason = f"Break-even (profit +{profit_pct:.2f}%)"
+
+                if target_sl is not None and target_sl > current_sl:
+                    new_sl = target_sl
 
                 # Extend TP if strong bullish continuation
                 signal_data = market_signals.get(symbol, {})
                 if signal_data.get("direction") == "bullish" and signal_data.get("confidence", 0) > 80:
-                    # Extend TP by 1 ATR distance above current price (using current_tp ratio)
                     current_tp_distance = current_tp - current
                     if current_tp_distance > 0:
                         # Extend by 50% of current TP distance
                         new_tp = current_tp + current_tp_distance * 0.5
                         reason += " + Extended TP (strong bullish signal)"
 
-                # Tighten SL if bearish signal appears
+                # Tighten SL if bearish signal appears (overrides ladder)
                 if signal_data.get("direction") == "bearish" and signal_data.get("confidence", 0) > 60:
                     tighten_sl = current * 0.995  # 0.5% below current
                     if tighten_sl > current_sl:

@@ -55,12 +55,16 @@ def main():
     print(f"  BACKTEST RESULT: {args.symbol}")
     print("=" * 50)
     print(f"  Total Return:     {result['total_return_pct']:+.2f}%")
+    print(f"  Buy & Hold:       {result.get('buy_hold_return_pct', 0):+.2f}%")
     print(f"  Final Capital:    ${result['final_capital']:,.2f}")
     print(f"  Total Trades:     {result['total_trades']}")
     print(f"  Wins / Losses:    {result['wins']} / {result['losses']}")
     print(f"  Win Rate:         {result['win_rate_pct']:.1f}%")
     print(f"  Profit Factor:    {result['profit_factor']:.2f}")
+    print(f"  Payoff Ratio:     {result.get('payoff_ratio', 0):.2f}")
+    print(f"  Expectancy:       {result.get('expectancy_pct_per_trade', 0):+.3f}% / trade")
     print(f"  Max Drawdown:     {result['max_drawdown_pct']:.2f}%")
+    print(f"  Fees:             {result.get('fee_pct_per_side', 0.1):.3f}% per side")
     print("=" * 50)
 
 

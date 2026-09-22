@@ -46,8 +46,9 @@ class Settings:
 
     # --- Bot ---
     RUN_MODE: str = os.getenv("RUN_MODE", "paper")  # paper | live
-    # Lowered thresholds for more signals (was 70/3.0/2.0, then 55/1.5/1.5, now 50/1.0/1.2)
-    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "50"))
+    # v2 confidence scale (strength x confluence): neutral market = 0%,
+    # one strong strategy ~= 64%, two agreeing ~= 76%. 60 = quality floor.
+    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "60"))
     MIN_EXPECTED_RISE: float = float(os.getenv("MIN_EXPECTED_RISE", "1.0"))
     # Top 5 recommendations only (was 15) - sent to Telegram + opened as positions
     MAX_RECOMMENDATIONS: int = int(os.getenv("MAX_RECOMMENDATIONS", "5"))
@@ -59,7 +60,15 @@ class Settings:
     # Maximum 5 open positions (matches MAX_RECOMMENDATIONS - all top 5 become positions)
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
     DAILY_MAX_LOSS: float = float(os.getenv("DAILY_MAX_LOSS", "5.0"))
-    MIN_RR_RATIO: float = float(os.getenv("MIN_RR_RATIO", "1.2"))
+    # Minimum risk/reward for any recommendation (SL/TP are built to satisfy this)
+    MIN_RR_RATIO: float = float(os.getenv("MIN_RR_RATIO", "1.5"))
+
+    # --- Position hygiene ---
+    # Skip a recommendation if the same symbol already has an open position
+    # (prevents duplicate entries on consecutive cycles)
+    SKIP_DUPLICATE_SYMBOLS: bool = os.getenv("SKIP_DUPLICATE_SYMBOLS", "true").lower() == "true"
+    # Telegram re-notification cooldown per symbol (hours) - prevents spam
+    TELEGRAM_COOLDOWN_HOURS: float = float(os.getenv("TELEGRAM_COOLDOWN_HOURS", "4"))
 
     # --- Analysis ---
     # Timeframes for analysis. For scalping: "15m" (single) or "15m,1h" (multi-TF confirmation)

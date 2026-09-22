@@ -2,6 +2,11 @@
 Backtesting Engine
 Replays historical OHLCV data through the SignalScorer to evaluate
 strategy performance over time.
+
+v2: realistic simulation:
+  - Trading fees (entry + exit, from settings.TRADING_FEE_PCT)
+  - Thresholds read from settings (MIN_CONFIDENCE / MIN_RR_RATIO)
+  - Expectancy, payoff ratio, holding-period and buy&hold metrics
 """
 import pandas as pd
 import numpy as np
@@ -9,6 +14,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 from datetime import datetime
 import time
+from config.settings import settings
 from src.analysis.scorer import scorer
 from src.utils.logger import log
 from src.utils.helpers import save_json, to_json_safe, fmt_pct
@@ -39,6 +45,8 @@ class Backtester:
             "stop_loss": sl,
             "take_profit": rec["take_profit"],
             "size": size,
+            "notional": notional,
+            "entry_fee": notional * (settings.TRADING_FEE_PCT / 100),
             "entry_time": timestamp,
             "confidence": rec["confidence"],
             "expected_rise_pct": rec["expected_rise_pct"],
@@ -48,49 +56,38 @@ class Backtester:
         return pos
 
     def _check_exits(self, current_price: float, timestamp: str) -> List[Dict]:
-        """Check all open positions for SL/TP hits and close them."""
+        """Check all open positions for SL/TP hits and close them (fees applied)."""
         closed = []
         remaining = []
         for pos in self.positions:
+            exit_price = None
+            reason = None
             if pos["direction"] == "bullish":
                 if current_price <= pos["stop_loss"]:
-                    pnl = (current_price - pos["entry_price"]) * pos["size"]
-                    pos["exit_price"] = current_price
-                    pos["exit_time"] = timestamp
-                    pos["pnl"] = pnl
-                    pos["reason"] = "SL"
-                    closed.append(pos)
-                    self.capital += pnl
-                    continue
+                    exit_price, reason = current_price, "SL"
                 elif current_price >= pos["take_profit"]:
-                    pnl = (current_price - pos["entry_price"]) * pos["size"]
-                    pos["exit_price"] = current_price
-                    pos["exit_time"] = timestamp
-                    pos["pnl"] = pnl
-                    pos["reason"] = "TP"
-                    closed.append(pos)
-                    self.capital += pnl
-                    continue
+                    exit_price, reason = pos["take_profit"], "TP"
             else:  # bearish
                 if current_price >= pos["stop_loss"]:
-                    pnl = (pos["entry_price"] - current_price) * pos["size"]
-                    pos["exit_price"] = current_price
-                    pos["exit_time"] = timestamp
-                    pos["pnl"] = pnl
-                    pos["reason"] = "SL"
-                    closed.append(pos)
-                    self.capital += pnl
-                    continue
+                    exit_price, reason = current_price, "SL"
                 elif current_price <= pos["take_profit"]:
-                    pnl = (pos["entry_price"] - current_price) * pos["size"]
-                    pos["exit_price"] = current_price
-                    pos["exit_time"] = timestamp
-                    pos["pnl"] = pnl
-                    pos["reason"] = "TP"
-                    closed.append(pos)
-                    self.capital += pnl
-                    continue
-            remaining.append(pos)
+                    exit_price, reason = pos["take_profit"], "TP"
+
+            if exit_price is None:
+                remaining.append(pos)
+                continue
+
+            notional = pos.get("notional", pos["size"] * pos["entry_price"])
+            exit_value = notional * (exit_price / pos["entry_price"])
+            exit_fee = exit_value * (settings.TRADING_FEE_PCT / 100)
+            pnl = exit_value - notional - pos.get("entry_fee", 0) - exit_fee
+            pos["exit_price"] = exit_price
+            pos["exit_time"] = timestamp
+            pos["pnl"] = pnl
+            pos["pnl_pct"] = pnl / notional * 100 if notional > 0 else 0
+            pos["reason"] = reason
+            closed.append(pos)
+            self.capital += pnl
         self.positions = remaining
         self.trades.extend(closed)
         return closed
@@ -136,8 +133,8 @@ class Backtester:
                 try:
                     rec = scorer.analyze_symbol(window_df, symbol)
                     if (rec.get("direction") == "bullish"
-                            and rec.get("confidence", 0) >= 70
-                            and rec.get("risk_reward_ratio", 0) >= 2.0):
+                            and rec.get("confidence", 0) >= settings.MIN_CONFIDENCE
+                            and rec.get("risk_reward_ratio", 0) >= settings.MIN_RR_RATIO):
                         self._open_position(rec, timestamp)
                 except Exception as e:
                     log.debug(f"Backtest bar {i} error: {e}")
@@ -172,6 +169,20 @@ class Backtester:
             sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses))
             if losses and sum(t["pnl"] for t in losses) != 0 else 0
         )
+        # Expectancy: average P&L per trade in % of notional
+        expectancy_pct = (
+            np.mean([t.get("pnl_pct", 0) for t in self.trades])
+            if total_trades > 0 else 0
+        )
+        # Payoff ratio: avg win / avg loss (in % terms)
+        avg_win_pct = np.mean([t.get("pnl_pct", 0) for t in wins]) if wins else 0
+        avg_loss_pct = abs(np.mean([t.get("pnl_pct", 0) for t in losses])) if losses else 0
+        payoff_ratio = avg_win_pct / avg_loss_pct if avg_loss_pct > 0 else 0
+        # Buy & hold comparison
+        first_price = float(df.iloc[warmup]["close"])
+        last_price = float(df.iloc[-1]["close"])
+        buy_hold_return = (last_price - first_price) / first_price * 100
+
         max_drawdown = 0
         peak = self.initial_capital
         for point in self.equity_curve:
@@ -188,14 +199,20 @@ class Backtester:
             "initial_capital": float(self.initial_capital),
             "final_capital": float(self.capital),
             "total_return_pct": float(total_return),
+            "buy_hold_return_pct": float(buy_hold_return),
             "total_trades": total_trades,
             "wins": len(wins),
             "losses": len(losses),
             "win_rate_pct": float(win_rate),
             "avg_win": float(avg_win),
             "avg_loss": float(avg_loss),
+            "avg_win_pct": float(avg_win_pct),
+            "avg_loss_pct": float(avg_loss_pct),
+            "payoff_ratio": float(payoff_ratio),
+            "expectancy_pct_per_trade": float(expectancy_pct),
             "profit_factor": float(profit_factor),
             "max_drawdown_pct": float(max_drawdown),
+            "fee_pct_per_side": float(settings.TRADING_FEE_PCT),
             "equity_curve": self.equity_curve,
             "trades": self.trades,
         }

@@ -54,15 +54,23 @@ def macd(series: pd.Series, fast: int = 12, slow: int = 26,
 
 def adx(high: pd.Series, low: pd.Series, close: pd.Series,
         period: int = 14) -> pd.DataFrame:
-    """Average Directional Index (ADX) with +DI and -DI."""
+    """Average Directional Index (ADX) with +DI and -DI.
+
+    Implements Wilder's original algorithm correctly:
+      +DM = up_move  when up_move > down_move AND up_move > 0, else 0
+      -DM = down_move when down_move > up_move AND down_move > 0, else 0
+    where up_move = high - prev_high, down_move = prev_low - low.
+    Both DM and TR are smoothed with Wilder's smoothing (EWM alpha=1/period).
+    """
     high = high.astype(float)
     low = low.astype(float)
     close = close.astype(float)
 
-    plus_dm = high.diff()
-    minus_dm = low.diff().abs()  # for -DM we need the absolute drop
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm.shift()) & (minus_dm > 0), 0.0)
+    up_move = high.diff()
+    down_move = -low.diff()  # prev_low - low
+
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
     tr = pd.concat([
         high - low,
@@ -70,11 +78,13 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series,
         (low - close.shift()).abs()
     ], axis=1).max(axis=1)
 
-    atr = tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx_val = dx.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    alpha = 1 / period
+    atr = tr.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=alpha, adjust=False, min_periods=period).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=alpha, adjust=False, min_periods=period).mean() / atr)
+    di_sum = (plus_di + minus_di).replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / di_sum
+    adx_val = dx.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
 
     return pd.DataFrame({
         "adx": adx_val,

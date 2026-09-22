@@ -104,6 +104,9 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
         score += 15
         signals.append(f"Below lower BB (Percent B = {pct_b:.2f})")
 
+    # === Confirmation: last candle closed bullish (no falling knives) ===
+    last_candle_bullish = bool(df["close"].iloc[-1] > df["open"].iloc[-1])
+
     # Compute suggested SL/TP using ATR
     atr_val = float(atr(high, low, close, 14).iloc[-1])
     sl_distance = atr_val * 1.2  # tighter SL for bottom fishing
@@ -127,6 +130,7 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
         "risk_reward_ratio": float(rr_ratio),
         "signals": signals,
         "bb_percent_b": pct_b,
+        "last_candle_bullish": last_candle_bullish,
         "patterns_detected": [p["pattern"] for p in patterns],
         "analyzed_at": now_utc().isoformat(),
     }

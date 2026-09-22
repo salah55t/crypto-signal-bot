@@ -43,3 +43,4 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+telegram_state.json
