@@ -1,0 +1,168 @@
+# ============================================
+# Render Blueprint - Crypto Signal Bot
+# ============================================
+# Deploy with: render deploy --blueprint render.yaml
+# Or via GitHub integration in Render dashboard.
+#
+# This blueprint deploys:
+#   - Web Service (FastAPI dashboard + bot scheduler)
+#   - PostgreSQL database (FREE 90 days, then $7/month)
+#
+# Cost:
+#   - Free tier: $0 (DB expires after 90 days, web service sleeps)
+#   - Recommended: $12/month (Starter web + Free DB still in 90-day grace)
+# ============================================
+
+databases:
+  - name: crypto-bot-db
+    databaseName: crypto_bot
+    user: crypto_bot_user
+    plan: free  # Free 90 days, then $7/month
+    region: singapore  # options: singapore, frankfurt, oregon, ohio
+    ipAllowList: []  # Empty = allow all IPs (set to specific IPs for security)
+
+services:
+  - type: web
+    name: crypto-signal-bot
+    runtime: python
+    # IMPORTANT: Choose region carefully!
+    # - Singapore (recommended): Binance.com works without restrictions
+    # - Frankfurt: Binance.com works in EU
+    # - Oregon/Ohio: BLOCKED by Binance.com (HTTP 451) - NOT recommended
+    region: singapore  # options: singapore, frankfurt, oregon, ohio
+    plan: free  # free | starter | standard
+    branch: main
+    rootDir: .
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: |
+      uvicorn src.web.app:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /api/health
+    autoDeploy: true
+    numInstances: 1
+    # NOTE: No disk section — Render Free Tier doesn't support Persistent Disks.
+    # We use PostgreSQL (free 90 days) for persistent storage instead.
+    # SQLite fallback will use ephemeral storage (resets on restart, but works for testing).
+
+    # Environment Variables
+    envVars:
+      # === Database (PostgreSQL) ===
+      # Render automatically sets DATABASE_URL when using databases: section above
+      # This is the connection string for PostgreSQL
+      - key: DATABASE_URL
+        fromDatabase:
+          name: crypto-bot-db
+          property: connectionString
+      # Fallback: if DATABASE_URL not set, use SQLite at /app/data/bot_stats.db
+
+      # === Bot Settings ===
+      - key: RUN_MODE
+        value: paper
+      # Lowered thresholds for more signals (was 70/3.0/2.0)
+      - key: MIN_CONFIDENCE
+        value: "50"
+      - key: MIN_EXPECTED_RISE
+        value: "1.0"
+      # Top 5 recommendations only (sent to Telegram + opened as positions)
+      - key: MAX_RECOMMENDATIONS
+        value: "5"
+      # Trade size: $10 per position (configurable)
+      - key: TRADE_AMOUNT_USD
+        value: "10"
+      # Binance spot trading fee: 0.1% per side
+      - key: TRADING_FEE_PCT
+        value: "0.1"
+      - key: RISK_PER_TRADE
+        value: "1.0"
+      # Maximum 5 open positions (matches MAX_RECOMMENDATIONS)
+      - key: MAX_OPEN_POSITIONS
+        value: "5"
+      - key: DAILY_MAX_LOSS
+        value: "5.0"
+      - key: MIN_RR_RATIO
+        value: "1.2"
+      - key: INITIAL_CAPITAL
+        value: "10000"
+
+      # === Analysis Settings ===
+      # Timeframes: "15m" for scalping (default) | "15m,1h" for multi-TF confirmation
+      # | "1h" for swing trading | "4h,1d" for position trading
+      - key: TIMEFRAMES
+        value: "15m"
+      # Cron: every 5 minutes (suitable for 15m timeframe)
+      - key: SCHEDULE_CRON
+        value: "*/5 * * * *"
+      - key: CANDLE_LIMIT
+        value: "200"
+      - key: ORDER_BOOK_DEPTH
+        value: "20"
+
+      # === Symbol Selection ===
+      # Set to "true" to fetch ALL USDT pairs from Binance (~400 symbols)
+      # Filtered by MIN_VOLUME_USDT and capped at MAX_SYMBOLS
+      - key: USE_ALL_USDT_PAIRS
+        value: "true"
+      # Min 24h volume in USDT (filters out low-liquidity pairs)
+      # $5M = keeps ~150 of the top pairs; $10M = ~100; $1M = ~250
+      - key: MIN_VOLUME_USDT
+        value: "5000000"
+      # Cap max symbols per cycle (prevents OOM on Render Free Tier 512MB RAM)
+      - key: MAX_SYMBOLS
+        value: "150"
+      # Parallel workers for data fetching (Binance IP limit 6000 weight/min)
+      - key: MAX_WORKERS
+        value: "8"
+      # Skip order book to speed up analysis (set "false" to enable liquidity strategy)
+      - key: SKIP_ORDER_BOOK
+        value: "false"
+
+      # === Reinforcement Learning (OPTIONAL, ADVANCED) ===
+      # Requires heavy deps (~500MB PyTorch). NOT recommended on Free Tier (512MB RAM)
+      # To enable:
+      # 1. Add "stable-baselines3[extra]" "gymnasium" "torch" to requirements.txt
+      # 2. Train models locally (python scripts/train_rl_agents.py)
+      # 3. Upload trained models to data/models/ on Render
+      # 4. Set ENABLE_RL_STRATEGY=true (and use Starter plan, not Free)
+      - key: ENABLE_RL_STRATEGY
+        value: "false"
+
+      # === Logging ===
+      - key: LOG_LEVEL
+        value: INFO
+
+      # === Startup behavior ===
+      # Set to "true" to run analysis immediately on startup
+      - key: RUN_ON_STARTUP
+        value: "false"
+
+      # === Binance API (OPTIONAL - leave empty to use public data) ===
+      # Add your Binance API keys here if you want authenticated endpoints
+      - key: BINANCE_API_KEY
+        sync: false  # means: set manually in Render dashboard
+      - key: BINANCE_API_SECRET
+        sync: false
+      # Public data URL - works in regions where api.binance.com is blocked
+      - key: BINANCE_BASE_URL
+        value: https://data-api.binance.vision
+      # Signed URL (for placing orders) - must be api.binance.com or testnet
+      - key: BINANCE_SIGNED_URL
+        value: https://api.binance.com
+      - key: BINANCE_TESTNET
+        value: "false"
+
+      # === Telegram (OPTIONAL - for notifications) ===
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_ENABLED
+        value: "false"
+
+      # === Python Settings ===
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"

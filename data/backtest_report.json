@@ -1,0 +1,258 @@
+{
+  "symbol": "BTCUSDT",
+  "status": "success",
+  "initial_capital": 10000.0,
+  "final_capital": 10000.0,
+  "total_return_pct": 0.0,
+  "total_trades": 0,
+  "wins": 0,
+  "losses": 0,
+  "win_rate_pct": 0.0,
+  "avg_win": 0.0,
+  "avg_loss": 0.0,
+  "profit_factor": 0.0,
+  "max_drawdown_pct": 0.0,
+  "equity_curve": [
+    {
+      "timestamp": "2026-09-02 15:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-03 01:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-03 11:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-03 21:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-04 07:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-04 17:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-05 03:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-05 13:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-05 23:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-06 09:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-06 19:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-07 05:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-07 15:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-08 01:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-08 11:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-08 21:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-09 07:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-09 17:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-10 03:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-10 13:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-10 23:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-11 09:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-11 19:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-12 05:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-12 15:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-13 01:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-13 11:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-13 21:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-14 07:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-14 17:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-15 03:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-15 13:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-15 23:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-16 09:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-16 19:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-17 05:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-17 15:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-18 01:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-18 11:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    },
+    {
+      "timestamp": "2026-09-18 21:00:00+00:00",
+      "capital": 10000.0,
+      "open_pnl": 0.0,
+      "equity": 10000.0
+    }
+  ],
+  "trades": []
+}

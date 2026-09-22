@@ -1,0 +1,18 @@
+# ============================================
+# OPTIONAL Reinforcement Learning dependencies
+# Heavy: ~500MB (PyTorch + stable-baselines3)
+#
+# Install ONLY if you want to use RL agents:
+#   pip install -r requirements-rl.txt
+#
+# Then train agents:
+#   python scripts/train_rl_agents.py --symbol BTCUSDT --interval 1h --limit 2000
+#
+# Enable in .env:
+#   ENABLE_RL_STRATEGY=true
+# ============================================
+
+torch>=2.0.0
+gymnasium>=0.29.0
+stable-baselines3>=2.0.0
+shimmy>=1.0.0

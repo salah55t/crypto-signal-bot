@@ -1,0 +1,68 @@
+# ============================================
+# Custom coin list to monitor
+# Add or remove symbols as needed
+# Format: symbol (without USDT suffix - it will be appended automatically)
+# All symbols are traded against USDT on Binance Spot
+# ============================================
+
+coins:
+  # --- Major Coins (high liquidity) ---
+  - BTC      # Bitcoin
+  - ETH      # Ethereum
+  - BNB      # Binance Coin
+  - SOL      # Solana
+  - XRP      # Ripple
+  - ADA      # Cardano
+  - AVAX     # Avalanche
+  - DOT      # Polkadot
+  - LINK     # Chainlink
+  - MATIC    # Polygon
+  
+  # --- DeFi ---
+  - UNI      # Uniswap
+  - AAVE     # Aave
+  - SUSHI    # SushiSwap
+  - COMP     # Compound
+  - CRV      # Curve DAO
+  - MKR      # Maker
+  - SNX      # Synthetix
+  - 1INCH    # 1inch
+  
+  # --- Layer 1 / Layer 2 ---
+  - NEAR     # Near
+  - ATOM     # Cosmos
+  - ALGO     # Algorand
+  - FTM      # Fantom
+  - ARB      # Arbitrum
+  - OP       # Optimism
+  - APT      # Aptos
+  - SUI      # Sui
+  - SEI      # Sei
+  - INJ      # Injective
+  
+  # --- Meme / Community ---
+  - DOGE     # Dogecoin
+  - SHIB     # Shiba Inu
+  - PEPE     # Pepe
+  - FLOKI    # Floki
+  - BONK     # Bonk
+  
+  # --- AI / Storage / Other ---
+  - FET      # Fetch.ai
+  - RNDR     # Render
+  - FIL      # Filecoin
+  - GRT      # The Graph
+  - IMX      # Immutable X
+  - LDO      # Lido DAO
+  - STX      # Stacks
+  - RUNE     # THORChain
+  
+  # --- Add your custom coins below ---
+  # - YOURCOIN
+
+# Pairs to exclude (e.g., delisted or low liquidity)
+exclude:
+  - USDCUSDT
+  - BUSDUSDT
+  - TUSDUSDT
+  - FDUSDUSDT

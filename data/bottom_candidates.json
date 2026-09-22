@@ -1,0 +1,115 @@
+{
+  "timestamp": "2026-09-20T20:36:19.220705+00:00",
+  "symbols_scanned": 10,
+  "candidates_found": 5,
+  "top_candidates": [
+    {
+      "symbol": "USD1USDT",
+      "score": 75.0,
+      "current_price": 0.9999,
+      "recent_low": 0.99975,
+      "recent_high": 1.00012,
+      "distance_from_low_pct": 0.01500375093773278,
+      "position_in_range_pct": 40.540540540550275,
+      "rsi": 47.04960665429915,
+      "atr_pct": 0.00802388845606446,
+      "stop_loss": 0.9998037229671933,
+      "take_profit": 1.0001005771516804,
+      "risk_reward_ratio": 2.0057715168042556,
+      "signals": [
+        "Price below 0.786 retracement (deep retracement)",
+        "Morning Star (0.9)"
+      ],
+      "bb_percent_b": 0.3822187389913433,
+      "patterns_detected": [
+        "Morning Star"
+      ],
+      "analyzed_at": "2026-09-20T20:36:19.213004+00:00"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "score": 57.0,
+      "current_price": 2633.59,
+      "recent_low": 2564.33,
+      "recent_high": 2668.0,
+      "distance_from_low_pct": 2.700900430131856,
+      "position_in_range_pct": 66.80814121732436,
+      "rsi": 62.6660044649049,
+      "atr_pct": 0.6717343114479293,
+      "stop_loss": 2612.3611268165664,
+      "take_profit": 2677.816819132154,
+      "risk_reward_ratio": 2.0833333333333353,
+      "signals": [
+        "Three White Soldiers (0.9)"
+      ],
+      "bb_percent_b": 0.8826484980330983,
+      "patterns_detected": [
+        "Doji",
+        "Three White Soldiers"
+      ],
+      "analyzed_at": "2026-09-20T20:36:19.018772+00:00"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "score": 48.0,
+      "current_price": 1.4078,
+      "recent_low": 1.368,
+      "recent_high": 1.4538,
+      "distance_from_low_pct": 2.9093567251461865,
+      "position_in_range_pct": 46.386946386946256,
+      "rsi": 57.632419603923935,
+      "atr_pct": 0.9357264779811078,
+      "stop_loss": 1.3919922111715783,
+      "take_profit": 1.440732893392545,
+      "risk_reward_ratio": 2.0833333333333344,
+      "signals": [
+        "Price below 0.786 retracement (deep retracement)"
+      ],
+      "bb_percent_b": 0.8910903361522484,
+      "patterns_detected": [
+        "Shooting Star",
+        "Bearish Harami"
+      ],
+      "analyzed_at": "2026-09-20T20:36:19.189126+00:00"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "score": 48.0,
+      "current_price": 110.28,
+      "recent_low": 107.4,
+      "recent_high": 114.32,
+      "distance_from_low_pct": 2.6815642458100517,
+      "position_in_range_pct": 41.6184971098266,
+      "rsi": 55.75245478124892,
+      "atr_pct": 0.8813627928787753,
+      "stop_loss": 109.11363973441594,
+      "take_profit": 112.70991721996678,
+      "risk_reward_ratio": 2.083333333333324,
+      "signals": [
+        "Price below 0.786 retracement (deep retracement)"
+      ],
+      "bb_percent_b": 0.8919704155432342,
+      "patterns_detected": [],
+      "analyzed_at": "2026-09-20T20:36:19.201772+00:00"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "score": 30.0,
+      "current_price": 81122.52,
+      "recent_low": 80126.04,
+      "recent_high": 81951.0,
+      "distance_from_low_pct": 1.243640644165131,
+      "position_in_range_pct": 54.60284061020554,
+      "rsi": 57.366683368260055,
+      "atr_pct": 0.3800962245993943,
+      "stop_loss": 80752.50763701614,
+      "take_profit": 81893.37908954972,
+      "risk_reward_ratio": 2.0833333333333397,
+      "signals": [],
+      "bb_percent_b": 0.8153524408320061,
+      "patterns_detected": [],
+      "analyzed_at": "2026-09-20T20:36:19.011573+00:00"
+    }
+  ],
+  "scan_time_seconds": 0.3
+}

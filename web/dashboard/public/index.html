@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Crypto Signal Bot - Pro Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="header-glass">
+    <div class="brand">
+      <div class="logo-gradient">🤖</div>
+      <div>
+        <h1>Crypto Signal Bot</h1>
+        <p class="subtitle">نظام تداول ذكي على Binance Spot — تحليل متعدد الاستراتيجيات</p>
+      </div>
+    </div>
+    <div class="status">
+      <button id="runNowBtn" class="btn-primary" title="تشغيل دورة تحليل فورية">
+        <span class="btn-icon">▶</span> تحليل الآن
+      </button>
+      <button id="resetBtn" class="btn-danger" title="تصفير كل المحفوظات">
+        <span class="btn-icon">🗑️</span> تصفير
+      </button>
+      <div class="status-pill">
+        <span class="status-dot" id="wsStatus">●</span>
+        <span id="wsStatusText">جاري الاتصال…</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Quick stats -->
+    <section class="stats-grid">
+      <div class="stat-card glass">
+        <span class="stat-label">آخر تحديث</span>
+        <span class="stat-value" id="lastUpdate">—</span>
+      </div>
+      <div class="stat-card glass">
+        <span class="stat-label">عملات تم تحليلها</span>
+        <span class="stat-value" id="totalAnalyzed">—</span>
+      </div>
+      <div class="stat-card glass">
+        <span class="stat-label">توصيات مقبولة</span>
+        <span class="stat-value" id="totalRecs">—</span>
+      </div>
+      <div class="stat-card glass">
+        <span class="stat-label">صفقات مفتوحة</span>
+        <span class="stat-value" id="openPositions">—</span>
+      </div>
+      <div class="stat-card glass">
+        <span class="stat-label">زمن التحليل</span>
+        <span class="stat-value" id="analysisTime">—</span>
+      </div>
+      <div class="stat-card glass">
+        <span class="stat-label">P&L الإجمالي</span>
+        <span class="stat-value" id="totalPnl">—</span>
+      </div>
+    </section>
+
+    <!-- Tabs -->
+    <div class="tabs-glass">
+      <button class="tab active" data-tab="recommendations">🟢 التوصيات</button>
+      <button class="tab" data-tab="bottoms">🔍 القاع</button>
+      <button class="tab" data-tab="all-analyses">📊 التحليلات</button>
+      <button class="tab" data-tab="positions">💼 الصفقات</button>
+      <button class="tab" data-tab="closed">📜 السجل</button>
+      <button class="tab" data-tab="stats">📈 الإحصائيات</button>
+    </div>
+
+    <!-- Tab 1: Recommendations -->
+    <section class="tab-content active" id="tab-recommendations">
+      <div class="cards-grid" id="recommendations">
+        <div class="empty glass">في انتظار التوصيات… اضغط "تحليل الآن" لبدء دورة فورية.</div>
+      </div>
+    </section>
+
+    <!-- Tab 2: Bottom candidates -->
+    <section class="tab-content" id="tab-bottoms">
+      <div class="filter-bar glass">
+        <button id="scanBottomsBtn" class="btn-purple">
+          <span class="btn-icon">🔍</span> فحص القاع الآن
+        </button>
+        <span class="filter-info" id="bottomScanInfo">—</span>
+      </div>
+      <div class="cards-grid" id="bottomCandidates">
+        <div class="empty glass">لا توجد عملات في القاع بعد. اضغط "فحص القاع الآن" للبحث.</div>
+      </div>
+    </section>
+
+    <!-- Tab 3: All analyses -->
+    <section class="tab-content" id="tab-all-analyses">
+      <div class="filter-bar glass">
+        <input type="text" id="symbolSearch" placeholder="🔍 ابحث عن عملة (مثل: BTC)" class="search-input">
+        <select id="filterDirection" class="select">
+          <option value="">الكل</option>
+          <option value="bullish">صاعد فقط</option>
+          <option value="bearish">هابط فقط</option>
+          <option value="neutral">محايد</option>
+        </select>
+        <select id="filterStatus" class="select">
+          <option value="">الكل</option>
+          <option value="recommended">مقبول</option>
+          <option value="rejected">مرفوض</option>
+        </select>
+        <span class="filter-info" id="filterInfo">—</span>
+      </div>
+      <div class="analyses-table glass" id="allAnalyses">
+        <div class="empty">لا توجد بيانات تحليل بعد.</div>
+      </div>
+    </section>
+
+    <!-- Tab 4: Positions -->
+    <section class="tab-content" id="tab-positions">
+      <div class="positions-list" id="positionsList">
+        <div class="empty glass">لا توجد صفقات مفتوحة.</div>
+      </div>
+    </section>
+
+    <!-- Tab 5: Closed trades history -->
+    <section class="tab-content" id="tab-closed">
+      <div class="closed-trades glass" id="closedTrades">
+        <div class="empty">لا توجد صفقات مغلقة بعد.</div>
+      </div>
+    </section>
+
+    <!-- Tab 6: Statistics -->
+    <section class="tab-content" id="tab-stats">
+      <div class="stats-grid">
+        <div class="stat-card glass">
+          <span class="stat-label">إجمالي دورات التحليل</span>
+          <span class="stat-value" id="statTotalRuns">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">إجمالي التوصيات</span>
+          <span class="stat-value" id="statTotalRecs">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">صفقات مغلقة</span>
+          <span class="stat-value" id="statClosed">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">معدل الفوز</span>
+          <span class="stat-value" id="statWinRate">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">إجمالي P&L</span>
+          <span class="stat-value" id="statTotalPnl">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">متوسط P&L%</span>
+          <span class="stat-value" id="statAvgPnl">—</span>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h2>🏆 أداء الاستراتيجيات</h2>
+      </div>
+      <div class="analyses-table glass" id="strategyStats">
+        <div class="empty">في انتظار البيانات...</div>
+      </div>
+
+      <div class="section-title">
+        <h2>📅 آخر 10 دورات تحليل</h2>
+      </div>
+      <div class="analyses-table glass" id="runsHistory">
+        <div class="empty">لا توجد دورات بعد.</div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>⚠️ هذه التوصيات لأغراض تعليمية فقط — تداول بمسؤوليتك الكاملة</p>
+  </footer>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- Modal for detailed analysis -->
+  <div class="modal" id="analysisModal">
+    <div class="modal-content glass">
+      <span class="modal-close" id="modalClose">×</span>
+      <div id="modalBody">—</div>
+    </div>
+  </div>
+
+  <!-- Reset confirmation modal -->
+  <div class="modal" id="resetModal">
+    <div class="modal-content glass">
+      <span class="modal-close" id="resetClose">×</span>
+      <h2 class="modal-title">⚠️ تأكيد التصفير</h2>
+      <p>هل أنت متأكد من تصفير <strong>كل المحفوظات</strong>؟</p>
+      <ul style="margin: 16px 0; color: var(--text-muted);">
+        <li>كل الصفقات المفتوحة</li>
+        <li>كل الصفقات المغلقة + السجل</li>
+        <li>كل التوصيات + إشارات الاستراتيجيات</li>
+        <li>إحصائيات يومية + عملات القاع</li>
+        <li>كل دورات التحليل في قاعدة البيانات</li>
+      </ul>
+      <p style="color: var(--red); font-size: 13px;">⚠️ لا يمكن التراجع عن هذه العملية!</p>
+      <div style="display: flex; gap: 12px; margin-top: 24px;">
+        <button id="confirmResetBtn" class="btn-danger" style="flex: 1;">
+          <span class="btn-icon">🗑️</span> نعم، صفّر كل شيء
+        </button>
+        <button id="cancelResetBtn" class="btn-secondary" style="flex: 1;">إلغاء</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
