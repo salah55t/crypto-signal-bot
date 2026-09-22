@@ -106,9 +106,13 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 50,
     res_clusters = cluster(resistances)
     sup_clusters = cluster(supports)
 
-    # Filter: only keep levels above (resistance) or below (support) current price
-    resistances = [r for r in res_clusters if r > current_price][:3]
-    supports = [s for s in sup_clusters if s < current_price][:3]
+    # Filter: only keep levels above (resistance) or below (support) current
+    # price. Sort NEAREST-first: resistances ascending (closest above price),
+    # supports descending (closest below price). The old code kept supports
+    # in ascending order, so "nearest_support" actually returned the FARTHEST
+    # (deepest) support - fixed in v3.
+    resistances = sorted([r for r in res_clusters if r > current_price])[:3]
+    supports = sorted([s for s in sup_clusters if s < current_price], reverse=True)[:3]
 
     return {
         "current_price": float(current_price),

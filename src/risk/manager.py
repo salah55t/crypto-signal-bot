@@ -133,6 +133,10 @@ class RiskManager:
             "entry_price": entry,
             "stop_loss": sl,
             "take_profit": rec["take_profit"],
+            # v3: Fibonacci + S/R entry/exit metadata (optional fields)
+            "entry_type": rec.get("entry_type", "market"),
+            "entry_zone": rec.get("entry_zone"),
+            "take_profit_2": rec.get("take_profit_2", rec["take_profit"]),
             "size": size,
             "notional_usd": notional_usd,
             "entry_fee": entry_fee,
@@ -255,6 +259,10 @@ class RiskManager:
                 "entry_price": float(avg_price),
                 "stop_loss": float(sl),
                 "take_profit": float(tp),
+                # v3: Fibonacci + S/R entry/exit metadata (optional fields)
+                "entry_type": rec.get("entry_type", "market"),
+                "entry_zone": rec.get("entry_zone"),
+                "take_profit_2": rec.get("take_profit_2", tp),
                 "size": float(executed_qty),
                 "notional_usd": float(cum_quote),
                 "entry_time": now_utc().isoformat(),

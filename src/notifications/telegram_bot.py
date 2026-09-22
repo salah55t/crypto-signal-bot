@@ -138,9 +138,35 @@ class TelegramNotifier:
         expected = rec.get("expected_rise_pct", 0)
         sl = rec.get("stop_loss", 0)
         tp = rec.get("take_profit", 0)
+        tp2 = rec.get("take_profit_2", 0)
         rr = rec.get("risk_reward_ratio", 0)
         score = rec.get("weighted_score", 0)
         atr_pct = rec.get("atr_pct", 0)
+
+        # v3: Fibonacci + S/R entry info (fallback-safe for boosted recs)
+        entry = rec.get("entry_price") or price
+        entry_type = rec.get("entry_type", "market")
+        zone = rec.get("entry_zone") or {}
+        zone_low = zone.get("low", entry)
+        zone_high = zone.get("high", entry)
+        entry_label = rec.get("entry_label", "")
+        tp1_label = rec.get("tp1_label", "")
+        tp2_label = rec.get("tp2_label", "")
+
+        if entry_type == "limit":
+            entry_line = (f"📍 *Entry (LIMIT):* `{fmt_price(entry)}`\n"
+                          f"↕️ *Entry Zone:* `{fmt_price(zone_low)}` → `{fmt_price(zone_high)}`")
+        else:
+            entry_line = f"📍 *Entry (Market):* `{fmt_price(entry)}`"
+        if entry_label:
+            entry_line += f"\n🧭 _{entry_label}_"
+
+        tp1_line = f"✅ *TP1:* `{fmt_price(tp)}` ({fmt_pct((tp-price)/price*100)})"
+        if tp1_label:
+            tp1_line += f" — _{tp1_label}_"
+        tp2_line = f"🎯 *TP2:* `{fmt_price(tp2)}` ({fmt_pct((tp2-price)/price*100)})"
+        if tp2_label:
+            tp2_line += f" — _{tp2_label}_"
 
         # Top reasons (combine strategy reasons)
         reasons = []
@@ -155,11 +181,13 @@ class TelegramNotifier:
             + f"\n"
             f"━━━━━━━━━━━━━━━\n"
             f"💰 *Price:* `{fmt_price(price)}`\n"
+            f"{entry_line}\n"
             f"📈 *Expected Rise:* `{fmt_pct(expected)}`\n"
             f"🎯 *Confidence:* `{conf:.1f}%` (score: {score:+.1f})\n"
             f"🛑 *Stop Loss:* `{fmt_price(sl)}` ({fmt_pct((sl-price)/price*100)})\n"
-            f"✅ *Take Profit:* `{fmt_price(tp)}` ({fmt_pct((tp-price)/price*100)})\n"
-            f"⚖️ *R/R Ratio:* `{rr:.2f}:1`\n"
+            f"{tp1_line}\n"
+            f"{tp2_line}\n"
+            f"⚖️ *R/R Ratio:* `{rr:.2f}:1` (TP1)\n"
             f"📊 *ATR:* `{atr_pct:.2f}%`\n"
             f"━━━━━━━━━━━━━━━\n"
             f"*Signals:*\n{reasons_text}"

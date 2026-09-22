@@ -40,6 +40,7 @@ from src.strategies import (
 )
 from src.indicators import technical as ta
 from src.indicators.liquidity import find_support_resistance
+from src.indicators.fibonacci import compute_fibonacci_levels, compute_entry_exit
 from src.utils.logger import log
 
 
@@ -114,17 +115,25 @@ class SignalScorer:
         }
 
     # ------------------------------------------------------------------
-    # SL / TP (structure-aware)
+    # Entry / SL / TP (Fibonacci + Support/Resistance aware, v3)
     # ------------------------------------------------------------------
     def _compute_sl_tp(self, df: pd.DataFrame, direction: str,
                        current_price: float, atr_val: float,
-                       sr: Dict) -> Dict:
-        """Structure-aware SL/TP.
+                       sr: Dict, fib: Optional[Dict] = None) -> Dict:
+        """Fibonacci + S/R entry and exit points (v3).
 
-        SL (bullish): just below the 10-bar swing low (+0.4 ATR buffer),
-        clamped to [0.9, 2.2] x ATR so it is never absurdly tight or wide.
-        TP: at nearest resistance (structure) but never below the minimum
-        R/R ratio; capped so targets stay realistic.
+        Entry:
+          - UP impulse: golden pocket (0.5-0.618 retracement), prefer
+            Fib x support confluence levels; "market" when price is
+            already inside the pocket, "limit" otherwise.
+          - DOWN impulse: market entry on the reversal bounce, with the
+            shallow retracement pocket (0.236-0.382) as the pullback zone.
+        SL: below/above the 10-bar swing structure + 0.4 ATR buffer,
+        clamped to [0.9, 2.2] x ATR (v2 risk model preserved).
+        TP1: first Fib extension / retracement / S/R level that satisfies
+        the minimum R/R ratio. TP2: next structure level beyond TP1.
+        Falls back to pure structure logic when no Fibonacci map exists
+        (flat market, neutral direction).
         """
         min_rr = max(1.2, settings.MIN_RR_RATIO)
 
@@ -133,40 +142,16 @@ class SignalScorer:
         swing_low = float(low.iloc[-10:].min())
         swing_high = float(high.iloc[-10:].max())
 
-        if direction == "bearish":
-            struct_dist = (swing_high - current_price) + 0.4 * atr_val
-            sl_dist = min(max(struct_dist, 0.9 * atr_val), 2.2 * atr_val)
-            stop_loss = current_price + sl_dist
-
-            res_level = sr.get("nearest_support")
-            tp_struct = (res_level - current_price) if res_level and res_level < current_price else None
-            tp_dist = max(tp_struct, min_rr * sl_dist) if tp_struct else min_rr * sl_dist
-            tp_dist = min(tp_dist, 5.0 * sl_dist)
-            take_profit = current_price - tp_dist
-        elif direction == "bullish":
-            struct_dist = (current_price - swing_low) + 0.4 * atr_val
-            sl_dist = min(max(struct_dist, 0.9 * atr_val), 2.2 * atr_val)
-            stop_loss = current_price - sl_dist
-
-            res_level = sr.get("nearest_resistance")
-            tp_struct = (res_level - current_price) if res_level and res_level > current_price else None
-            tp_dist = max(tp_struct, min_rr * sl_dist) if tp_struct else min_rr * sl_dist
-            tp_dist = min(tp_dist, 5.0 * sl_dist)
-            take_profit = current_price + tp_dist
-        else:
-            sl_dist = 1.5 * atr_val
-            stop_loss = current_price - sl_dist
-            take_profit = current_price + 1.5 * sl_dist
-            tp_dist = 1.5 * sl_dist
-
-        rr_ratio = tp_dist / sl_dist if sl_dist > 0 else 0.0
-        return {
-            "stop_loss": float(stop_loss),
-            "take_profit": float(take_profit),
-            "risk_reward_ratio": float(rr_ratio),
-            "sl_distance_pct": float(sl_dist / current_price * 100) if current_price > 0 else 0.0,
-            "tp_distance_pct": float(tp_dist / current_price * 100) if current_price > 0 else 0.0,
-        }
+        return compute_entry_exit(
+            direction=direction,
+            current_price=current_price,
+            atr_val=atr_val,
+            sr=sr,
+            fib=fib or {},
+            swing_low=swing_low,
+            swing_high=swing_high,
+            min_rr=min_rr,
+        )
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -217,7 +202,11 @@ class SignalScorer:
         expected_rise_pct = float(min(expected_rise_pct, 30.0))
 
         sr = find_support_resistance(df, lookback=50)
-        sl_tp = self._compute_sl_tp(df, direction, current_price, atr_val, sr)
+        # v3: Fibonacci map (impulse, retracements, extensions, golden zone)
+        # combined with S/R for entry / exit points.
+        fib = compute_fibonacci_levels(df, lookback=100)
+        sl_tp = self._compute_sl_tp(df, direction, current_price, atr_val, sr,
+                                     fib=fib)
 
         return {
             "symbol": symbol,
@@ -228,14 +217,32 @@ class SignalScorer:
             "confluence": verdict["confluence"],
             "current_price": current_price,
             "expected_rise_pct": expected_rise_pct,
+            "entry_price": sl_tp["entry_price"],
+            "entry_type": sl_tp["entry_type"],
+            "entry_zone": sl_tp["entry_zone"],
+            "entry_label": sl_tp.get("entry_label", ""),
             "stop_loss": sl_tp["stop_loss"],
             "take_profit": sl_tp["take_profit"],
+            "take_profit_2": sl_tp["take_profit_2"],
+            "tp2_rr": sl_tp.get("tp2_rr", 0.0),
+            "tp1_label": sl_tp.get("tp1_label", ""),
+            "tp2_label": sl_tp.get("tp2_label", ""),
             "risk_reward_ratio": sl_tp["risk_reward_ratio"],
             "sl_distance_pct": sl_tp["sl_distance_pct"],
             "tp_distance_pct": sl_tp["tp_distance_pct"],
+            "tp2_distance_pct": sl_tp.get("tp2_distance_pct", 0.0),
+            "fib_notes": sl_tp.get("fib_notes", []),
             "atr": float(atr_val),
             "atr_pct": float(atr_pct * 100),
             "signals": [s.to_dict() for s in signals],
+            "fibonacci": {
+                "impulse": fib.get("impulse"),
+                "swing_high": fib.get("swing_high"),
+                "swing_low": fib.get("swing_low"),
+                "golden_zone": fib.get("golden_zone"),
+                "retracements": fib.get("retracements", {}),
+                "extensions": fib.get("extensions", {}),
+            },
             "support_resistance": {
                 "supports": sr.get("supports", []),
                 "resistances": sr.get("resistances", []),
