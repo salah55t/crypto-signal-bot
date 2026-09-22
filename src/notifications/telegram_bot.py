@@ -168,6 +168,40 @@ class TelegramNotifier:
         if tp2_label:
             tp2_line += f" — _{tp2_label}_"
 
+        # v4: integrated confluence layers (fallback-safe for old recs)
+        icho = rec.get("ichimoku") or {}
+        ell = rec.get("elliott") or {}
+        decision = rec.get("decision") or {}
+        confluence_lines = ""
+        if icho:
+            cloud_map = {"above": "Above cloud ☁️", "below": "Below cloud ☁️",
+                          "inside": "Inside cloud ☁️"}
+            confluence_lines += (
+                f"\n🌥 *Ichimoku:* `{icho.get('regime', 'N/A').upper()}` — "
+                f"{cloud_map.get(icho.get('price_vs_cloud', ''), '')}"
+                f" | TK: {icho.get('tk_state', 'N/A')}"
+                f" | Kumo: {icho.get('cloud_color', 'N/A')}"
+            )
+        if ell and ell.get("pattern", "unclear") != "unclear":
+            wave_txt = ell.get("current_wave") or "-"
+            conf_pct = ell.get("wave_confidence", 0) * 100
+            confluence_lines += (
+                f"\n〰️ *Elliott:* `Wave {wave_txt}` — {ell.get('implication', '')}"
+                f" (fit: {conf_pct:.0f}%)"
+            )
+            if ell.get("projection"):
+                confluence_lines += (
+                    f"\n🎚 *Wave Target:* `{fmt_price(ell['projection'])}`"
+                )
+        if decision:
+            badge = "🅰️ *A+ SETUP*" if decision.get("a_plus") else "🧩"
+            confluence_lines += (
+                f"\n{badge} *Confluence:* base {decision.get('base_confidence', 0):.0f}%"
+                f" → final *{conf:.1f}%*"
+            )
+            for adj in decision.get("adjustments", [])[:4]:
+                confluence_lines += f"\n   ▪ _{adj}_"
+
         # Top reasons (combine strategy reasons)
         reasons = []
         for sig in rec.get("signals", []):
@@ -189,7 +223,8 @@ class TelegramNotifier:
             f"{tp2_line}\n"
             f"⚖️ *R/R Ratio:* `{rr:.2f}:1` (TP1)\n"
             f"📊 *ATR:* `{atr_pct:.2f}%`\n"
-            f"━━━━━━━━━━━━━━━\n"
+            f"{confluence_lines}"
+            f"\n━━━━━━━━━━━━━━━\n"
             f"*Signals:*\n{reasons_text}"
         )
 

@@ -81,10 +81,17 @@ class RiskManager:
         Validates R/R ratio, ATR sanity, etc.
         """
         reasons = []
+        # v4: vetoed signals (Ichimoku regime opposition) can never open positions
+        if rec.get("decision", {}).get("vetoed", False):
+            reasons.append(
+                f"Vetoed by confluence engine: "
+                f"{rec.get('decision', {}).get('veto_reason', 'regime opposition')}"
+            )
         rr = rec.get("risk_reward_ratio", 0)
         if rr < settings.MIN_RR_RATIO:
             reasons.append(f"R/R too low ({rr:.2f} < {settings.MIN_RR_RATIO})")
-        if rec.get("confidence", 0) < settings.MIN_CONFIDENCE:
+        if rec.get("admission_confidence",
+                   rec.get("confidence", 0)) < settings.MIN_CONFIDENCE:
             reasons.append(f"Confidence too low ({rec['confidence']:.1f}%)")
         if rec.get("expected_rise_pct", 0) < settings.MIN_EXPECTED_RISE:
             reasons.append(f"Expected rise too low ({rec['expected_rise_pct']:.2f}%)")

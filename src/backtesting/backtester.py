@@ -133,7 +133,9 @@ class Backtester:
                 try:
                     rec = scorer.analyze_symbol(window_df, symbol)
                     if (rec.get("direction") == "bullish"
-                            and rec.get("confidence", 0) >= settings.MIN_CONFIDENCE
+                            and not rec.get("decision", {}).get("vetoed", False)
+                            and rec.get("admission_confidence",
+                                        rec.get("confidence", 0)) >= settings.MIN_CONFIDENCE
                             and rec.get("risk_reward_ratio", 0) >= settings.MIN_RR_RATIO):
                         self._open_position(rec, timestamp)
                 except Exception as e:

@@ -41,6 +41,9 @@ from src.strategies import (
 from src.indicators import technical as ta
 from src.indicators.liquidity import find_support_resistance
 from src.indicators.fibonacci import compute_fibonacci_levels, compute_entry_exit
+from src.indicators.ichimoku import ichimoku_state
+from src.indicators.elliott import detect_elliott_wave
+from src.analysis.confluence import confluence_engine
 from src.utils.logger import log
 
 
@@ -208,11 +211,37 @@ class SignalScorer:
         sl_tp = self._compute_sl_tp(df, direction, current_price, atr_val, sr,
                                      fib=fib)
 
+        # v4: Ichimoku regime gate + Elliott cycle timing + integrated
+        # confluence rules. The Ichimoku gate can VETO the signal; the
+        # Elliott layer adjusts confidence and may promote its wave-5
+        # projection into TP2.
+        icho = ichimoku_state(df)
+        elliott = detect_elliott_wave(df)
+        min_rr = max(1.2, settings.MIN_RR_RATIO)
+        decision = confluence_engine.evaluate(
+            direction=direction,
+            confidence=verdict["confidence"],
+            ichimoku=icho,
+            elliott=elliott,
+            fib=fib,
+            sl_tp=sl_tp,
+            current_price=current_price,
+            min_rr=min_rr,
+            veto_enabled=settings.CONFLUENCE_VETO_ENABLED,
+        )
+
         return {
             "symbol": symbol,
             "direction": direction,
             "weighted_score": verdict["weighted_score"],
-            "confidence": verdict["confidence"],
+            "confidence": decision["confidence"],
+            "base_confidence": decision["base_confidence"],
+            # v4 rule: boosts may RANK a signal higher but can never ADMIT it
+            # past the quality threshold - only its base merit can. Penalties
+            # (chop discount, late-cycle, counter-trend) CAN demote it out.
+            "admission_confidence": float(
+                min(decision["base_confidence"], decision["confidence"])
+            ),
             "avg_strength": verdict["avg_strength"],
             "confluence": verdict["confluence"],
             "current_price": current_price,
@@ -249,6 +278,15 @@ class SignalScorer:
                 "nearest_support": sr.get("nearest_support"),
                 "nearest_resistance": sr.get("nearest_resistance"),
             },
+            "ichimoku": icho or {},
+            "elliott": elliott or {},
+            "decision": {
+                "vetoed": decision["vetoed"],
+                "veto_reason": decision["veto_reason"],
+                "adjustments": decision["adjustments"],
+                "a_plus": decision["a_plus"],
+                "base_confidence": decision["base_confidence"],
+            },
         }
 
     def filter_signals(self, recommendations: List[Dict],
@@ -267,7 +305,9 @@ class SignalScorer:
         filtered = [
             r for r in recommendations
             if r.get("direction") == direction
-            and r.get("confidence", 0) >= min_confidence
+            and not r.get("decision", {}).get("vetoed", False)
+            and r.get("admission_confidence",
+                      r.get("confidence", 0)) >= min_confidence
             and r.get("expected_rise_pct", 0) >= min_expected_rise
             and r.get("risk_reward_ratio", 0) >= settings.MIN_RR_RATIO
         ]

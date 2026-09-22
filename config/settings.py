@@ -63,6 +63,12 @@ class Settings:
     # Minimum risk/reward for any recommendation (SL/TP are built to satisfy this)
     MIN_RR_RATIO: float = float(os.getenv("MIN_RR_RATIO", "1.5"))
 
+    # --- v4 Integrated Confluence (Ichimoku + Elliott) ---
+    # When True, a signal whose direction opposes the Ichimoku cloud regime
+    # is VETOED (excluded from Telegram + positions). Set false to only
+    # discount instead of veto.
+    CONFLUENCE_VETO_ENABLED: bool = os.getenv("CONFLUENCE_VETO_ENABLED", "true").lower() == "true"
+
     # --- Position hygiene ---
     # Skip a recommendation if the same symbol already has an open position
     # (prevents duplicate entries on consecutive cycles)
