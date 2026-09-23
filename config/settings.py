@@ -150,7 +150,10 @@ class Settings:
 
     # --- Analysis ---
     # Timeframes for analysis. For scalping: "15m" (single) or "15m,1h" (multi-TF confirmation)
-    TIMEFRAMES: list = [tf.strip() for tf in os.getenv("TIMEFRAMES", "15m").split(",")]
+    # v5.1 (2026-09-23): default switched 15m -> 1h. Comprehensive backtest
+    # (18 symbols x 3000 bars + 8 x 2000 @15m) showed 1h expectancy +0.815%/trade
+    # (PF 1.83) vs 15m +0.127%/trade (PF 1.15) — 6.4x better per trade.
+    TIMEFRAMES: list = [tf.strip() for tf in os.getenv("TIMEFRAMES", "1h").split(",")]
     # Run every 10 minutes by default (was: hourly)
     # Examples: "*/10 * * * *" = every 10 min | "0 * * * *" = hourly | "*/30 * * * *" = every 30 min
     SCHEDULE_CRON: str = os.getenv("SCHEDULE_CRON", "*/10 * * * *")

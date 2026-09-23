@@ -86,13 +86,14 @@ services:
         value: "10000"
 
       # === Analysis Settings ===
-      # Timeframes: "15m" for scalping (default) | "15m,1h" for multi-TF confirmation
-      # | "1h" for swing trading | "4h,1d" for position trading
+      # Timeframes: "1h" (default, v5.1: 6.4x expectancy of 15m in backtest)
+      # | "15m" for scalping | "15m,1h" for multi-TF confirmation | "4h,1d" for position trading
       - key: TIMEFRAMES
-        value: "15m"
-      # Cron: every 5 minutes (suitable for 15m timeframe)
+        value: "1h"
+      # Cron: every 10 minutes (1h candles change slowly; position monitor
+      # still runs every 1 minute independently for SL/TP/trailing)
       - key: SCHEDULE_CRON
-        value: "*/5 * * * *"
+        value: "*/10 * * * *"
       - key: CANDLE_LIMIT
         value: "200"
       - key: ORDER_BOOK_DEPTH
