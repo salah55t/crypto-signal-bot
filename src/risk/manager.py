@@ -4,9 +4,17 @@ Risk Management Module
 - Daily max loss enforcement
 - Risk/Reward check
 - Stop loss / Take profit verification
+
+v5 "Veteran Trader" management:
+  - Partial TP: bank half at TP1, SL -> break-even+fees, run rest to TP2
+  - MFE/MAE excursion tracking per position (peak/trough since entry)
+  - ATR chandelier trailing (market-adaptive) on top of the % ladder
+  - Structure exits: Ichimoku regime flip / opposite strong signal
+  - Time stop: stale trades are dead capital
+  - Pending LIMIT entries: buy the golden pocket, never chase
 """
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from datetime import datetime, timezone, timedelta
 from config.settings import settings
 from src.db.database import db
@@ -15,6 +23,7 @@ from src.utils.helpers import load_json, save_json, now_utc
 
 POSITIONS_FILE = Path("data/open_positions.json")
 DAILY_STATS_FILE = Path("data/daily_stats.json")
+PENDING_FILE = Path("data/pending_entries.json")
 
 
 class RiskManager:
@@ -24,13 +33,17 @@ class RiskManager:
         self.capital = capital or settings.INITIAL_CAPITAL
         self.open_positions: List[Dict] = load_json(POSITIONS_FILE, default=[])
         self.daily_stats: Dict = load_json(DAILY_STATS_FILE, default={})
+        self.pending_entries: List[Dict] = (
+            load_json(PENDING_FILE, default=[]) if settings.PENDING_ENTRIES_ENABLED else []
+        )
         # v4.1 loss-avoidance state
         self._reentry_block: Dict[str, datetime] = {}  # symbol -> blocked until
         self._restore_loss_state()
         log.info(
-            f"[cyan]RiskManager[/] initialized - "
+            f"[cyan]RiskManager[/] initialized (v5) - "
             f"Capital: ${self.capital:,.2f} | "
-            f"Open positions: {len(self.open_positions)}"
+            f"Open positions: {len(self.open_positions)} | "
+            f"Pending limit entries: {len(self.pending_entries)}"
         )
 
     def _restore_loss_state(self):
@@ -178,6 +191,7 @@ class RiskManager:
         """
         Returns (is_valid, reasons).
         Validates R/R ratio, ATR sanity, etc.
+        v5: harmony gate (layered agreement) + volatility sanity.
         """
         reasons = []
         # v4: vetoed signals (Ichimoku regime opposition) can never open positions
@@ -196,6 +210,20 @@ class RiskManager:
             reasons.append(f"Expected rise too low ({rec['expected_rise_pct']:.2f}%)")
         if rec.get("stop_loss", 0) <= 0:
             reasons.append("Invalid stop loss")
+        # v5: layered harmony gate - a veteran requires layered agreement
+        if float(rec.get("harmony", 0.0)) < settings.MIN_HARMONY:
+            reasons.append(
+                f"Harmony too low ({rec.get('harmony', 0.0):.2f} "
+                f"< {settings.MIN_HARMONY:.2f})"
+            )
+        # v5: skip chaotic candles
+        if settings.EXCLUDE_VOLATILITY_EXTREME and rec.get("volatility_extreme"):
+            reasons.append(
+                f"Volatility extreme (ATR {rec.get('atr_pct_total', 0):.2f}% "
+                f"> {settings.ATR_PCT_MAX:.2f}%)"
+            )
+        if rec.get("dead_market"):
+            reasons.append("Dead market (ATR% below floor)")
         return (len(reasons) == 0, reasons)
 
     def open_paper_position(self, rec: Dict) -> Dict:
@@ -203,16 +231,17 @@ class RiskManager:
         Uses TRADE_AMOUNT_USD ($10 default) for position sizing.
         Applies LOT_SIZE rules from Binance and trading fees (0.1%).
         """
+        # Duplicate-symbol guard runs FIRST (cheap + more specific reason)
+        if settings.SKIP_DUPLICATE_SYMBOLS and self.has_open_position(rec["symbol"]):
+            return {"status": "rejected",
+                    "reasons": [f"{rec['symbol']} already has an open position"]}
+
         valid, reasons = self.validate_recommendation(rec)
         if not valid:
             return {"status": "rejected", "reasons": reasons}
 
         if not self.can_open_position(rec.get("symbol")):
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
-
-        # Duplicate-symbol guard (second line of defense)
-        if settings.SKIP_DUPLICATE_SYMBOLS and self.has_open_position(rec["symbol"]):
-            return {"status": "rejected", "reasons": [f"{rec['symbol']} already has an open position"]}
 
         entry = rec["current_price"]
         sl = rec["stop_loss"]
@@ -249,6 +278,17 @@ class RiskManager:
             "entry_time": now_utc().isoformat(),
             "confidence": rec["confidence"],
             "expected_rise_pct": rec["expected_rise_pct"],
+            # v5: veteran trade management metadata
+            "harmony": float(rec.get("harmony", 0.0)),
+            "atr": float(rec.get("atr", 0) or 0),
+            "initial_notional_usd": notional_usd,
+            "initial_size": size,
+            "tp1_taken": False,
+            "partial_closes": [],
+            "peak_price": entry,
+            "trough_price": entry,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
             "status": "open",
             "paper": True,
         }
@@ -289,13 +329,16 @@ class RiskManager:
         if not rec.get("direction") == "bullish":
             return {"status": "rejected", "reasons": ["Only bullish positions supported for spot"]}
 
+        # Duplicate-symbol guard runs FIRST (cheap + more specific reason)
+        if settings.SKIP_DUPLICATE_SYMBOLS and self.has_open_position(rec["symbol"]):
+            return {"status": "rejected",
+                    "reasons": [f"{rec['symbol']} already has an open position"]}
+
         valid, reasons = self.validate_recommendation(rec)
         if not valid:
             return {"status": "rejected", "reasons": reasons}
         if not self.can_open_position():
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
-        if settings.SKIP_DUPLICATE_SYMBOLS and self.has_open_position(rec["symbol"]):
-            return {"status": "rejected", "reasons": [f"{rec['symbol']} already has an open position"]}
 
         symbol = rec["symbol"]
         entry = rec["current_price"]
@@ -402,32 +445,85 @@ class RiskManager:
             return self.open_live_position(rec)
         return self.open_paper_position(rec)
 
-    def close_position(self, idx: int, exit_price: float, reason: str = "") -> Dict:
+    def close_position(self, idx: int, exit_price: float, reason: str = "",
+                       fraction: float = 1.0) -> Dict:
         """Close an open position at the given exit price.
-        P&L = (exit_value - entry_value) - entry_fee - exit_fee
-        Both paper and live positions use SAME fee calculation.
+
+        v5: `fraction < 1.0` closes a PARTIAL chunk (e.g. TP1 banking).
+        - P&L is realized on the closed fraction only
+        - the position stays open with reduced notional/size
+        - partial closes do NOT touch the win/loss streak counters (only
+          full closes do) - they only add realized P&L
         """
         if idx >= len(self.open_positions):
             return {"status": "error", "reason": "Invalid index"}
         pos = self.open_positions[idx]
+        fraction = max(0.0, min(1.0, float(fraction)))
+        partial = fraction < 0.999
+        if partial and fraction * (pos.get("notional_usd") or 0) < 1.0:
+            # too small to be worth a partial close - close fully instead
+            fraction = 1.0
+            partial = False
+
         entry_price = pos["entry_price"]
-        size = pos.get("size", 0)
-        notional_usd = pos.get("notional_usd", size * entry_price)
-        entry_fee = pos.get("entry_fee", 0)
+        notional_full = pos.get("notional_usd", pos.get("size", 0) * entry_price)
+        notional_chunk = notional_full * fraction
+        entry_fee = pos.get("entry_fee", 0) * fraction
 
         # Calculate exit value (proportional to entry)
         if entry_price > 0:
-            exit_value = notional_usd * (exit_price / entry_price)
+            exit_value = notional_chunk * (exit_price / entry_price)
         else:
-            exit_value = notional_usd
+            exit_value = notional_chunk
 
         # Exit fee (0.1% of exit value)
         exit_fee = exit_value * (settings.TRADING_FEE_PCT / 100)
         # Net P&L = exit_value - entry_value - entry_fee - exit_fee
-        gross_pnl = exit_value - notional_usd
+        gross_pnl = exit_value - notional_chunk
         net_pnl = gross_pnl - entry_fee - exit_fee
-        pnl_pct = (net_pnl / notional_usd * 100) if notional_usd > 0 else 0
+        pnl_pct = (net_pnl / notional_chunk * 100) if notional_chunk > 0 else 0
 
+        if partial:
+            # ---- v5 partial close: shrink position, keep it open ----
+            pos["notional_usd"] = notional_full - notional_chunk
+            pos["size"] = pos.get("size", 0) * (1.0 - fraction)
+            pos["entry_fee"] = pos.get("entry_fee", 0) - entry_fee
+            pos.setdefault("partial_closes", []).append({
+                "time": now_utc().isoformat(),
+                "price": exit_price,
+                "fraction": fraction,
+                "pnl": net_pnl,
+                "pnl_pct": pnl_pct,
+                "reason": reason,
+            })
+            save_json(self.open_positions, POSITIONS_FILE)
+            self._ensure_today_stats()
+            self.daily_stats[self._today_key()]["pnl"] += net_pnl
+            self.daily_stats[self._today_key()]["partials"] = (
+                self.daily_stats[self._today_key()].get("partials", 0) + 1
+            )
+            save_json(self.daily_stats, DAILY_STATS_FILE)
+            try:
+                db.log_position_closed(
+                    symbol=pos["symbol"],
+                    entry_time=pos["entry_time"],
+                    exit_price=exit_price,
+                    exit_time=now_utc().isoformat(),
+                    pnl=net_pnl,
+                    pnl_pct=pnl_pct,
+                    close_reason=reason,
+                )
+            except Exception as e:
+                log.debug(f"DB log partial close failed: {e}")
+            log.info(
+                f"[green]PARTIAL close ({fraction*100:.0f}%)[/] {pos['symbol']} - "
+                f"Net: ${net_pnl:+.4f} ({pnl_pct:+.2f}%) - {reason} | "
+                f"remaining notional ${pos['notional_usd']:.2f}"
+            )
+            return {"status": "partial", "position": pos, "pnl": net_pnl,
+                    "pnl_pct": pnl_pct, "reason": reason, "fraction": fraction}
+
+        # ---- full close (original path, fraction == 1.0) ----
         closed = {**pos, "exit_price": exit_price, "exit_time": now_utc().isoformat(),
                   "pnl": net_pnl, "pnl_pct": pnl_pct, "reason": reason,
                   "status": "closed", "entry_fee": entry_fee, "exit_fee": exit_fee,
@@ -485,25 +581,210 @@ class RiskManager:
         )
         return closed
 
+    # ============================================
+    # v5: EXCURSION TRACKING + TIME STOP + STRUCTURE EXITS
+    # ============================================
+
+    @staticmethod
+    def _position_age_hours(pos: Dict) -> float:
+        try:
+            entered = datetime.fromisoformat(pos["entry_time"])
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=timezone.utc)
+            return (now_utc() - entered).total_seconds() / 3600.0
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def track_excursions(pos: Dict, price: float) -> None:
+        """v5: update peak/trough + MFE/MAE since entry (in-place, cheap)."""
+        if not price or not pos.get("entry_price"):
+            return
+        entry = pos["entry_price"]
+        peak = max(float(pos.get("peak_price") or entry), price)
+        trough = min(float(pos.get("trough_price") or entry), price)
+        pos["peak_price"] = peak
+        pos["trough_price"] = trough
+        if pos.get("direction") == "bullish":
+            pos["mfe_pct"] = max(pos.get("mfe_pct", 0.0),
+                                 (peak - entry) / entry * 100)
+            pos["mae_pct"] = max(pos.get("mae_pct", 0.0),
+                                 (entry - trough) / entry * 100)
+        else:
+            pos["mfe_pct"] = max(pos.get("mfe_pct", 0.0),
+                                 (entry - trough) / entry * 100)
+            pos["mae_pct"] = max(pos.get("mae_pct", 0.0),
+                                 (peak - entry) / entry * 100)
+
+    def _check_time_stop(self, pos: Dict, pnl_pct: float) -> Optional[str]:
+        """v5: a trade that goes nowhere is dead capital."""
+        age_h = self._position_age_hours(pos)
+        if age_h >= settings.ABSOLUTE_MAX_TRADE_HOURS:
+            return (f"Max holding time reached "
+                    f"({age_h:.1f}h >= {settings.ABSOLUTE_MAX_TRADE_HOURS:.0f}h)")
+        if (age_h >= settings.MAX_TRADE_HOURS
+                and pnl_pct < settings.TIME_STOP_MIN_PNL_PCT):
+            return (f"Time stop: stale trade ({age_h:.1f}h, "
+                    f"{pnl_pct:+.2f}% < {settings.TIME_STOP_MIN_PNL_PCT:.2f}%)")
+        return None
+
+    def evaluate_structural_exit(self, pos: Dict, sig: Dict,
+                                 current_price: float) -> Tuple[str, Optional[str]]:
+        """
+        v5 market-aware exit decision from the latest analysis of this symbol.
+        Returns (action, reason) where action is:
+          "exit"        -> close the whole position
+          "tighten"     -> raise the SL to pos["_structural_sl"] (set by caller)
+          "none"
+        Only called from the main analysis cycle (klines-backed signals).
+        """
+        if not settings.STRUCTURAL_EXITS_ENABLED or not sig:
+            return ("none", None)
+        icho = sig.get("ichimoku") or {}
+        direction = pos.get("direction", "bullish")
+
+        # 1) Opposite strong confluence signal -> thesis invalid
+        sig_dir = sig.get("direction")
+        sig_conf = float(sig.get("confidence", 0) or 0)
+        if (sig_dir and sig_dir != direction
+                and sig_dir in ("bullish", "bearish")
+                and sig_conf >= settings.OPPOSITE_SIGNAL_CONF):
+            return ("exit",
+                    f"Opposite {sig_dir} signal (conf {sig_conf:.0f}% >= "
+                    f"{settings.OPPOSITE_SIGNAL_CONF:.0f}%)")
+
+        if not icho:
+            return ("none", None)
+        regime = icho.get("regime")
+        kijun = icho.get("kijun")
+        tenkan = icho.get("tenkan")
+
+        if direction == "bullish":
+            # 2) Ichimoku regime flipped bearish -> thesis dead, exit
+            if regime == "bearish":
+                return ("exit", "Ichimoku regime flipped bearish")
+            # 3) Regime decayed to neutral + price lost Kijun -> tighten to Kijun
+            if regime == "neutral" and icho.get("price_vs_kijun") == "below" and kijun:
+                if kijun < current_price:
+                    return ("tighten", f"Kijun defence ({kijun:.4f})")
+            # 4) Fresh bearish TK cross -> tighten to Tenkan
+            if (icho.get("tk_cross_recent") == "bearish"
+                    and icho.get("tk_state") == "bearish" and tenkan
+                    and tenkan < current_price):
+                return ("tighten", f"Tenkan cross-down defence ({tenkan:.4f})")
+        else:
+            if regime == "bullish":
+                return ("exit", "Ichimoku regime flipped bullish")
+            if regime == "neutral" and icho.get("price_vs_kijun") == "above" and kijun:
+                if kijun > current_price:
+                    return ("tighten", f"Kijun defence ({kijun:.4f})")
+            if (icho.get("tk_cross_recent") == "bullish"
+                    and icho.get("tk_state") == "bullish" and tenkan
+                    and tenkan > current_price):
+                return ("tighten", f"Tenkan cross-up defence ({tenkan:.4f})")
+        return ("none", None)
+
     def check_open_positions(self, prices: Dict[str, float]) -> List[Dict]:
-        """Check open positions for SL/TP hits."""
-        closed = []
+        """Check open positions: SL / TP1-partial / TP2 / time stop.
+
+        v5 veteran flow per position (bullish shown; bearish mirrored):
+          1. MFE/MAE excursion tracking (peak/trough since entry)
+          2. Hard SL hit -> full close
+          3. Time stop (stale trade) -> full close
+          4. TP1 not taken yet and price >= TP1:
+             -> bank PARTIAL_TP_FRACTION at TP1, SL -> break-even+fees,
+                promote TP to TP2 when it extends further
+          5. Remaining runner hits the (possibly promoted) TP -> full close
+        Returns list of full-close dicts (partials are returned too, tagged).
+        """
+        results = []
         for i in range(len(self.open_positions) - 1, -1, -1):
             pos = self.open_positions[i]
             price = prices.get(pos["symbol"])
             if not price:
                 continue
-            if pos["direction"] == "bullish":
-                if price <= pos["stop_loss"]:
-                    closed.append(self.close_position(i, pos["stop_loss"], "Stop Loss Hit"))
-                elif price >= pos["take_profit"]:
-                    closed.append(self.close_position(i, pos["take_profit"], "Take Profit Hit"))
-            else:  # bearish
-                if price >= pos["stop_loss"]:
-                    closed.append(self.close_position(i, pos["stop_loss"], "Stop Loss Hit"))
-                elif price <= pos["take_profit"]:
-                    closed.append(self.close_position(i, pos["take_profit"], "Take Profit Hit"))
-        return closed
+
+            self.track_excursions(pos, price)
+
+            direction = pos["direction"]
+            if direction == "bullish":
+                profit_pct = (price - pos["entry_price"]) / pos["entry_price"] * 100
+                sl_hit = price <= pos["stop_loss"]
+                tp_hit = price >= pos["take_profit"]
+            else:
+                profit_pct = (pos["entry_price"] - price) / pos["entry_price"] * 100
+                sl_hit = price >= pos["stop_loss"]
+                tp_hit = price <= pos["take_profit"]
+
+            # 1) hard stop first (priority over everything)
+            if sl_hit:
+                results.append(self.close_position(
+                    i, pos["stop_loss"], "Stop Loss Hit"))
+                continue
+
+            # 2) time stop (uses live pnl)
+            stop_reason = self._check_time_stop(pos, profit_pct)
+            if stop_reason:
+                results.append(self.close_position(i, price, stop_reason))
+                continue
+
+            # 3) TP ladder: partial at TP1, runner to TP2
+            if tp_hit and settings.PARTIAL_TP_ENABLED and not pos.get("tp1_taken"):
+                fraction = max(0.1, min(0.9, settings.PARTIAL_TP_FRACTION))
+                partial_res = self.close_position(
+                    i, pos["take_profit"], "TP1 Partial", fraction=fraction)
+                if partial_res.get("status") == "partial":
+                    pos = self.open_positions[i]  # refreshed after partial
+                    pos["tp1_taken"] = True
+                    # SL to break-even + fee buffer (never turns a winner red)
+                    entry = pos["entry_price"]
+                    buf = settings.TP1_FEE_BUFFER_PCT / 100.0
+                    be_sl = (entry * (1 + buf) if direction == "bullish"
+                             else entry * (1 - buf))
+                    current_sl = pos["stop_loss"]
+                    if (direction == "bullish" and be_sl > current_sl) or \
+                       (direction == "bearish" and be_sl < current_sl):
+                        pos["stop_loss"] = be_sl
+                    # promote runner target to TP2 when it extends beyond TP1
+                    tp2 = pos.get("take_profit_2")
+                    if isinstance(tp2, (int, float)) and tp2:
+                        if direction == "bullish" and tp2 > pos["take_profit"]:
+                            pos["take_profit"] = tp2
+                        elif direction == "bearish" and tp2 < pos["take_profit"]:
+                            pos["take_profit"] = tp2
+                    save_json(self.open_positions, POSITIONS_FILE)
+                    log.info(
+                        f"[blue]Break-even lock[/] {pos['symbol']} "
+                        f"SL -> {pos['stop_loss']:.4f} | "
+                        f"runner TP -> {pos['take_profit']:.4f}"
+                    )
+                    results.append(partial_res)
+                    # same tick may already reach the promoted runner TP
+                    price = prices.get(pos["symbol"])
+                    if not price:
+                        continue
+                    if direction == "bullish":
+                        sl_hit = price <= pos["stop_loss"]
+                        tp_hit = price >= pos["take_profit"]
+                    else:
+                        sl_hit = price >= pos["stop_loss"]
+                        tp_hit = price <= pos["take_profit"]
+                    if sl_hit:
+                        results.append(self.close_position(
+                            i, pos["stop_loss"], "Stop Loss Hit (BE)"))
+                        continue
+                    if tp_hit:
+                        results.append(self.close_position(
+                            i, pos["take_profit"], "Take Profit 2 Hit"))
+                        continue
+                elif partial_res.get("status") == "error":
+                    continue
+
+            elif tp_hit:
+                # TP1 already taken (or partials disabled) -> final target
+                results.append(self.close_position(
+                    i, pos["take_profit"], "Take Profit Hit"))
+        return results
 
     # ============================================
     # DYNAMIC SL/TP UPDATE (Trailing Stop + Break-Even)
@@ -569,13 +850,15 @@ class RiskManager:
         """
         Apply dynamic SL/TP adjustment based on price movement and market signals.
 
-        Trailing Stop Ladder (for LONG positions) - v2 jumps DIRECTLY to the
-        highest level reached (the old elif-chain lagged one level per cycle,
-        so it never caught up with fast pumps on 10-minute cycles):
-          - +1.0% profit: SL -> entry (break-even)
-          - +2.0% profit: SL -> +1.0%
-          - +3.0% profit: SL -> +2.0%
-          - +5.0%+ profit: SL trails 1% below current price
+        v5 veteran trailing (LONG positions) - two cooperating mechanisms,
+        the most protective valid level wins:
+          1. Ladder (unchanged): +1% -> BE, +2% -> +1%, +3% -> +2%,
+             +5% -> trail 1% below price
+          2. ATR chandelier: SL trails CHANDELIER_ATR_MULT x ATR below the
+             highest price seen since entry (peak_price) once profit >= 1%.
+             Market-adaptive: wide in trends, tight in chop.
+        Safety: SL never loosens, and never goes above (current - 0.1%)
+        for longs (would close instantly).
           - On bearish signal (conf > 60): tighten SL to 0.5% below current
           - On strong bullish continuation (conf > 80): extend TP higher
         """
@@ -591,6 +874,8 @@ class RiskManager:
             if not current or not entry:
                 continue
 
+            self.track_excursions(pos, current)
+
             if pos["direction"] == "bullish":
                 profit_pct = (current - entry) / entry * 100
             else:
@@ -601,8 +886,8 @@ class RiskManager:
             reason = ""
 
             if pos["direction"] == "bullish":
-                # --- Trailing ladder: compute TARGET SL for the profit level,
-                # then take the max(target, current_sl) so we always jump
+                # --- Mechanism 1: ladder (compute TARGET SL for the profit
+                # level, then take max(target, current_sl) so we always jump
                 # straight to the highest earned level.
                 target_sl = None
                 if profit_pct >= 5.0:
@@ -621,6 +906,27 @@ class RiskManager:
                 if target_sl is not None and target_sl > current_sl:
                     new_sl = target_sl
 
+                # --- Mechanism 2: ATR chandelier (v5) ---
+                if settings.CHANDELIER_ENABLED and profit_pct >= 1.0:
+                    atr_val = self._atr_for(symbol, market_signals, pos)
+                    if atr_val and atr_val > 0:
+                        peak = float(pos.get("peak_price") or current)
+                        chand = peak - settings.CHANDELIER_ATR_MULT * atr_val
+                        # only meaningful if it tightens and stays below price
+                        chand = min(chand, current * 0.999)
+                        if chand > (new_sl if new_sl is not None else current_sl):
+                            new_sl = chand
+                            reason = (
+                                f"Chandelier trail {settings.CHANDELIER_ATR_MULT}xATR "
+                                f"(peak {peak:.4f}, +{profit_pct:.2f}%)"
+                            )
+
+                # hard cap: never place SL at/above the current price
+                if new_sl is not None:
+                    new_sl = min(new_sl, current * 0.999)
+                    if new_sl <= current_sl:
+                        new_sl = None
+
                 # Extend TP if strong bullish continuation
                 signal_data = market_signals.get(symbol, {})
                 if signal_data.get("direction") == "bullish" and signal_data.get("confidence", 0) > 80:
@@ -637,12 +943,242 @@ class RiskManager:
                         new_sl = tighten_sl
                         reason = f"Tightened SL (bearish signal detected, conf={signal_data['confidence']:.0f}%)"
 
+            elif pos["direction"] == "bearish":
+                # mirror ladder for bearish (chandelier mirrored)
+                target_sl = None
+                if profit_pct >= 5.0:
+                    target_sl = current * 1.01
+                    reason = f"Trailing stop (profit +{profit_pct:.2f}%)"
+                elif profit_pct >= 3.0:
+                    target_sl = entry * 0.98
+                    reason = f"Lock +2% profit (current +{profit_pct:.2f}%)"
+                elif profit_pct >= 2.0:
+                    target_sl = entry * 0.99
+                    reason = f"Lock +1% profit (current +{profit_pct:.2f}%)"
+                elif profit_pct >= 1.0:
+                    target_sl = entry
+                    reason = f"Break-even (profit +{profit_pct:.2f}%)"
+                if target_sl is not None and (current_sl is None or target_sl < current_sl):
+                    new_sl = target_sl
+
+                if settings.CHANDELIER_ENABLED and profit_pct >= 1.0:
+                    atr_val = self._atr_for(symbol, market_signals, pos)
+                    if atr_val and atr_val > 0:
+                        trough = float(pos.get("trough_price") or current)
+                        chand = trough + settings.CHANDELIER_ATR_MULT * atr_val
+                        chand = max(chand, current * 1.001)
+                        floor_sl = new_sl if new_sl is not None else current_sl
+                        if chand < floor_sl:
+                            new_sl = chand
+                            reason = (
+                                f"Chandelier trail {settings.CHANDELIER_ATR_MULT}xATR "
+                                f"(trough {trough:.4f}, +{profit_pct:.2f}%)"
+                            )
+
+                if new_sl is not None:
+                    new_sl = max(new_sl, current * 1.001)
+                    if current_sl is not None and new_sl >= current_sl:
+                        new_sl = None
+
+                signal_data = market_signals.get(symbol, {})
+                if signal_data.get("direction") == "bullish" and signal_data.get("confidence", 0) > 60:
+                    tighten_sl = current * 1.005
+                    if current_sl is None or tighten_sl < current_sl:
+                        new_sl = tighten_sl
+                        reason = f"Tightened SL (bullish signal detected, conf={signal_data['confidence']:.0f}%)"
+
             if new_sl is not None or new_tp is not None:
                 result = self.update_position_risk(i, current, new_sl, new_tp, reason)
                 if result.get("status") == "updated":
                     updates.append(result["update"])
 
         return updates
+
+    @staticmethod
+    def _atr_for(symbol: str, market_signals: Dict[str, Dict],
+                 pos: Dict) -> Optional[float]:
+        """ATR source precedence: fresh analysis -> stored at entry."""
+        sig = market_signals.get(symbol) or {}
+        atr = sig.get("atr")
+        if isinstance(atr, (int, float)) and atr > 0:
+            return float(atr)
+        atr = pos.get("atr")
+        if isinstance(atr, (int, float)) and atr > 0:
+            return float(atr)
+        return None
+
+    # ============================================
+    # v5: PENDING LIMIT ENTRIES — "buy the pocket, never chase"
+    # ============================================
+
+    def add_pending_entry(self, rec: Dict, reason: str = "") -> Dict:
+        """Arm a pending LIMIT entry at the golden-pocket/entry zone.
+
+        Instead of chasing a market buy when price has already left the
+        entry zone, the setup is parked here and filled ONLY if price comes
+        back into the zone within PENDING_TTL_HOURS.
+        """
+        symbol = rec["symbol"]
+        # one pending per symbol
+        self.pending_entries = [
+            p for p in self.pending_entries if p.get("symbol") != symbol
+        ]
+        if len(self.pending_entries) >= settings.MAX_PENDING_ENTRIES:
+            # drop the oldest
+            self.pending_entries.sort(key=lambda p: p.get("created_at", ""))
+            self.pending_entries.pop(0)
+        zone = rec.get("entry_zone") or {}
+        entry = rec.get("entry_price") or rec.get("current_price") or 0
+        zone_low = float(zone.get("low") or entry)
+        zone_high = float(zone.get("high") or entry)
+        pending = {
+            "symbol": symbol,
+            "direction": rec.get("direction", "bullish"),
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "ref_price": rec.get("current_price"),
+            "atr": float(rec.get("atr", 0) or 0),
+            "created_at": now_utc().isoformat(),
+            "expires_at": (now_utc() + timedelta(
+                hours=settings.PENDING_TTL_HOURS)).isoformat(),
+            "reason": reason,
+            "rec": rec,
+        }
+        self.pending_entries.append(pending)
+        save_json(self.pending_entries, PENDING_FILE)
+        log.info(
+            f"[cyan]Pending LIMIT entry armed[/] {symbol} "
+            f"zone [{zone_low:.4f} - {zone_high:.4f}] "
+            f"(ttl {settings.PENDING_TTL_HOURS:.0f}h) - {reason}"
+        )
+        return pending
+
+    def check_pending_fills(self, prices: Dict[str, float]) -> List[Dict]:
+        """Fill / cancel / expire pending entries (called by the 1-min watcher).
+
+        Long logic:
+          - price <= zone_high  -> FILL at current price (a real limit fill)
+            (re-checks every risk gate before the fill)
+          - price < zone_low - PENDING_INVALID_ATR x ATR -> CANCEL (zone broke)
+          - expired -> drop
+        """
+        if not self.pending_entries:
+            return []
+        filled, kept = [], []
+        now = now_utc()
+        for pending in self.pending_entries:
+            symbol = pending["symbol"]
+            price = prices.get(symbol)
+            expired = pending.get("expires_at") and now >= datetime.fromisoformat(
+                pending["expires_at"])
+            if not price or expired:
+                if expired:
+                    log.info(f"[yellow]Pending entry expired[/] {symbol}")
+                continue  # drop silently when no price (stale data)
+
+            if pending.get("direction") != "bullish":
+                continue  # spot bot: longs only for now
+
+            zone_low = pending["zone_low"]
+            zone_high = pending["zone_high"]
+            atr = pending.get("atr") or 0
+            invalid_level = zone_low - settings.PENDING_INVALID_ATR * atr
+
+            # zone broke: price collapsed THROUGH the pocket -> setup dead
+            # (checked BEFORE the fill: a limit buy must not fill on a crash)
+            if price < invalid_level:
+                log.info(
+                    f"[yellow]Pending entry cancelled[/] {symbol} - "
+                    f"zone broken (price {price:.4f} < {invalid_level:.4f})"
+                )
+                continue  # cancel
+
+            if price <= zone_high:
+                # ---- FILL: price returned into the zone ----
+                rec = dict(pending["rec"])
+                rec["current_price"] = price  # realistic limit fill price
+                rec["entry_price"] = price
+                result = self.open_position(rec)
+                if result.get("status") == "opened":
+                    filled.append({
+                        "symbol": symbol,
+                        "fill_price": price,
+                        "position": result["position"],
+                    })
+                    log.info(
+                        f"[green]Pending entry FILLED[/] {symbol} @ {price:.4f} "
+                        f"(zone [{zone_low:.4f}-{zone_high:.4f}])"
+                    )
+                    continue  # consumed
+                else:
+                    reasons = result.get("reasons", [])
+                    log.info(
+                        f"[yellow]Pending fill rejected[/] {symbol}: {reasons}"
+                    )
+                    # a rejected fill (risk limits) -> drop it, don't retry
+                    continue
+
+            kept.append(pending)
+
+        if len(kept) != len(self.pending_entries):
+            self.pending_entries = kept
+            save_json(self.pending_entries, PENDING_FILE)
+        return filled
+
+    def cancel_pending(self, symbol: str) -> bool:
+        """Manually cancel a pending entry (also used after a fill opens)."""
+        before = len(self.pending_entries)
+        self.pending_entries = [
+            p for p in self.pending_entries if p.get("symbol") != symbol
+        ]
+        if len(self.pending_entries) != before:
+            save_json(self.pending_entries, PENDING_FILE)
+            return True
+        return False
+
+    # ============================================
+    # v5: MARKET TIDE (BTC) FILTER
+    # ============================================
+
+    def market_tide_blocked(self) -> Tuple[bool, str]:
+        """Block NEW entries when the BTC regime is strongly bearish.
+        Cached to data/market_tide.json for MARKET_FILTER_CACHE_MIN minutes.
+        Open positions are ALWAYS still managed - this gate is entries-only.
+        """
+        if not settings.MARKET_FILTER_ENABLED:
+            return (False, "")
+        cache_file = Path("data/market_tide.json")
+        cached = load_json(cache_file, default={})
+        try:
+            fetched_at = datetime.fromisoformat(cached["fetched_at"])
+            age_min = (now_utc() - fetched_at).total_seconds() / 60
+        except Exception:
+            age_min = 1e9
+        if age_min > settings.MARKET_FILTER_CACHE_MIN:
+            try:
+                from src.core.data_fetcher import data_fetcher
+                from src.indicators.ichimoku import ichimoku_state
+                df = data_fetcher.get_candles(
+                    settings.MARKET_FILTER_SYMBOL,
+                    "1h", limit=max(120, settings.CANDLE_LIMIT))
+                icho = ichimoku_state(df)
+                cached = {
+                    "fetched_at": now_utc().isoformat(),
+                    "regime": icho.get("regime"),
+                    "score": icho.get("score", 0),
+                }
+                save_json(cached, cache_file)
+            except Exception as e:
+                log.warning(f"Market tide fetch failed: {e}")
+                cached = cached or {"regime": None, "score": 0}
+
+        regime = cached.get("regime")
+        score = float(cached.get("score") or 0)
+        if regime == "bearish" and score <= -40:
+            return (True,
+                    f"Market tide bearish ({settings.MARKET_FILTER_SYMBOL} "
+                    f"score {score:.0f}) - new entries paused")
+        return (False, "")
 
     def get_positions_with_pnl(self, current_prices: Dict[str, float]) -> List[Dict]:
         """Return open positions with real-time P&L info (fees included)."""
@@ -702,6 +1238,18 @@ class RiskManager:
                 "tp_distance_pct": float(tp_dist),
                 "progress_pct": float(progress),
                 "updates_count": len(pos.get("risk_updates", [])),
+                # v5 real-time tracking fields
+                "age_hours": round(self._position_age_hours(pos), 2),
+                "stage": "runner" if pos.get("tp1_taken") else "entry",
+                "peak_price": pos.get("peak_price"),
+                "trough_price": pos.get("trough_price"),
+                "mfe_pct": float(pos.get("mfe_pct", 0.0)),
+                "mae_pct": float(pos.get("mae_pct", 0.0)),
+                "partials_taken": len(pos.get("partial_closes", [])),
+                "time_stop_pending": bool(
+                    self._position_age_hours(pos) >= settings.MAX_TRADE_HOURS
+                    and pnl_pct < settings.TIME_STOP_MIN_PNL_PCT
+                ),
             })
         return positions_with_pnl
 

@@ -84,6 +84,59 @@ class Settings:
     # discount instead of veto.
     CONFLUENCE_VETO_ENABLED: bool = os.getenv("CONFLUENCE_VETO_ENABLED", "true").lower() == "true"
 
+    # --- v5 "Veteran Trader" entry harmony ( layered agreement gate ) ---
+    # Harmony = how well ALL layers agree (regime + cycle + entry zone +
+    # strategy confluence), 0..1. An experienced trader demands layered
+    # agreement, not just a high single score.
+    MIN_HARMONY: float = float(os.getenv("MIN_HARMONY", "0.45"))
+    # Skip chaotic candles (ATR% of price above max) and dead markets (below min)
+    ATR_PCT_MAX: float = float(os.getenv("ATR_PCT_MAX", "3.5"))
+    ATR_PCT_MIN: float = float(os.getenv("ATR_PCT_MIN", "0.12"))
+    EXCLUDE_VOLATILITY_EXTREME: bool = os.getenv(
+        "EXCLUDE_VOLATILITY_EXTREME", "true").lower() == "true"
+    # Market tide filter: block new longs when BTC regime is strongly bearish
+    MARKET_FILTER_ENABLED: bool = os.getenv(
+        "MARKET_FILTER_ENABLED", "true").lower() == "true"
+    MARKET_FILTER_SYMBOL: str = os.getenv("MARKET_FILTER_SYMBOL", "BTCUSDT")
+    MARKET_FILTER_CACHE_MIN: int = int(os.getenv("MARKET_FILTER_CACHE_MIN", "30"))
+
+    # --- v5 Pending limit entries (buy the pocket, don't chase) ---
+    PENDING_ENTRIES_ENABLED: bool = os.getenv(
+        "PENDING_ENTRIES_ENABLED", "true").lower() == "true"
+    MAX_PENDING_ENTRIES: int = int(os.getenv("MAX_PENDING_ENTRIES", "6"))
+    PENDING_TTL_HOURS: float = float(os.getenv("PENDING_TTL_HOURS", "4"))
+    # If price is more than 0.35 ATR above the golden-pocket zone -> arm a
+    # pending limit entry instead of chasing with a market buy.
+    PENDING_CHASE_ATR: float = float(os.getenv("PENDING_CHASE_ATR", "0.35"))
+    # Cancel a pending entry when price collapses this far BELOW the zone
+    PENDING_INVALID_ATR: float = float(os.getenv("PENDING_INVALID_ATR", "0.5"))
+    # Momentum bypass: A+ setups / very high confidence enter at market even
+    # above the zone (veterans chase ONLY the strongest momentum).
+    PENDING_MOMENTUM_CONF: float = float(os.getenv("PENDING_MOMENTUM_CONF", "82"))
+
+    # --- v5 Market-aware position management (exits like a pro) ---
+    # Take 50% off at TP1, move SL to break-even+fees, trail the rest to TP2.
+    PARTIAL_TP_ENABLED: bool = os.getenv("PARTIAL_TP_ENABLED", "true").lower() == "true"
+    PARTIAL_TP_FRACTION: float = float(os.getenv("PARTIAL_TP_FRACTION", "0.5"))
+    # SL placed at entry*(1 + buffer) after TP1 so fees never turn it into a loss
+    TP1_FEE_BUFFER_PCT: float = float(os.getenv("TP1_FEE_BUFFER_PCT", "0.25"))
+    # ATR chandelier trailing: trail SL `mult` x ATR below the highest seen price
+    CHANDELIER_ENABLED: bool = os.getenv("CHANDELIER_ENABLED", "true").lower() == "true"
+    CHANDELIER_ATR_MULT: float = float(os.getenv("CHANDELIER_ATR_MULT", "2.5"))
+    # Structure exits: Ichimoku regime flip / opposite strong signal
+    STRUCTURAL_EXITS_ENABLED: bool = os.getenv(
+        "STRUCTURAL_EXITS_ENABLED", "true").lower() == "true"
+    OPPOSITE_SIGNAL_CONF: float = float(os.getenv("OPPOSITE_SIGNAL_CONF", "75"))
+    # Time stop: a trade that goes nowhere is dead capital
+    MAX_TRADE_HOURS: float = float(os.getenv("MAX_TRADE_HOURS", "24"))
+    TIME_STOP_MIN_PNL_PCT: float = float(os.getenv("TIME_STOP_MIN_PNL_PCT", "0.5"))
+    ABSOLUTE_MAX_TRADE_HOURS: float = float(os.getenv("ABSOLUTE_MAX_TRADE_HOURS", "48"))
+
+    # --- Rate limiting (Binance 6000 weight/min, shared Render IP) ---
+    RATE_LIMIT_BUDGET_PER_MIN: int = int(os.getenv("RATE_LIMIT_BUDGET_PER_MIN", "4500"))
+    # Order book snapshots are cached this many minutes (weight 5 each)
+    ORDER_BOOK_TTL_MIN: int = int(os.getenv("ORDER_BOOK_TTL_MIN", "30"))
+
     # --- Position hygiene ---
     # Skip a recommendation if the same symbol already has an open position
     # (prevents duplicate entries on consecutive cycles)

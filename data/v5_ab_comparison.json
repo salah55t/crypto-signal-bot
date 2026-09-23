@@ -1,0 +1,259 @@
+{
+  "rows": [
+    {
+      "engine": "v4.1",
+      "trades": 33,
+      "avg_wr_pct": 57.6,
+      "avg_pf": 1.78,
+      "avg_expectancy_pct": 0.649,
+      "avg_max_dd_pct": 1.69,
+      "avg_return_pct": 1.07
+    },
+    {
+      "engine": "v5",
+      "trades": 21,
+      "avg_wr_pct": 66.7,
+      "avg_pf": 2.49,
+      "avg_expectancy_pct": 0.475,
+      "avg_max_dd_pct": 0.35,
+      "avg_return_pct": 0.5
+    },
+    {
+      "engine": "v4.1",
+      "trades": 36,
+      "avg_wr_pct": 55.6,
+      "avg_pf": 1.51,
+      "avg_expectancy_pct": 0.61,
+      "avg_max_dd_pct": 1.61,
+      "avg_return_pct": 1.09
+    },
+    {
+      "engine": "v5",
+      "trades": 18,
+      "avg_wr_pct": 66.7,
+      "avg_pf": 3.23,
+      "avg_expectancy_pct": 1.014,
+      "avg_max_dd_pct": 0.54,
+      "avg_return_pct": 0.91
+    },
+    {
+      "engine": "v4.1",
+      "trades": 41,
+      "avg_wr_pct": 61.0,
+      "avg_pf": 2.02,
+      "avg_expectancy_pct": 1.291,
+      "avg_max_dd_pct": 1.23,
+      "avg_return_pct": 2.66
+    },
+    {
+      "engine": "v5",
+      "trades": 21,
+      "avg_wr_pct": 71.4,
+      "avg_pf": 3.87,
+      "avg_expectancy_pct": 1.515,
+      "avg_max_dd_pct": 0.74,
+      "avg_return_pct": 1.6
+    }
+  ],
+  "details": {
+    "BTCUSDT": {
+      "baseline": {
+        "symbol": "BTCUSDT",
+        "status": "success",
+        "engine": "v4.1-baseline",
+        "initial_capital": 10000.0,
+        "final_capital": 10107.289271047133,
+        "total_return_pct": 1.0728927104713328,
+        "buy_hold_return_pct": 35.426575651354995,
+        "total_trades": 33,
+        "wins": 19,
+        "losses": 14,
+        "win_rate_pct": 57.57575757575758,
+        "avg_win": 12.857849820448337,
+        "avg_loss": -9.786419681527464,
+        "avg_win_pct": 2.5566108078824707,
+        "avg_loss_pct": 1.9394940620020937,
+        "payoff_ratio": 1.3181843955961081,
+        "expectancy_pct_per_trade": 0.6491723782344736,
+        "profit_factor": 1.7830769178001817,
+        "max_drawdown_pct": 1.6906374086753964,
+        "fee_pct_per_side": 0.1,
+        "partial_tp_trades": 0,
+        "exit_reasons": {
+          "TP": 19,
+          "SL": 14
+        }
+      },
+      "v5": {
+        "symbol": "BTCUSDT",
+        "status": "success",
+        "engine": "v5",
+        "initial_capital": 10000.0,
+        "final_capital": 10049.884643511989,
+        "total_return_pct": 0.49884643511988547,
+        "buy_hold_return_pct": 35.426575651354995,
+        "total_trades": 21,
+        "wins": 14,
+        "losses": 7,
+        "win_rate_pct": 66.66666666666666,
+        "avg_win": 5.960647704518566,
+        "avg_loss": -4.794917764466439,
+        "avg_win_pct": 1.1890409330769542,
+        "avg_loss_pct": 0.9539149577064903,
+        "payoff_ratio": 1.24648525895409,
+        "expectancy_pct_per_trade": 0.4747223028158061,
+        "profit_factor": 2.4862356341920893,
+        "max_drawdown_pct": 0.3510784552056249,
+        "fee_pct_per_side": 0.1,
+        "partial_tp_trades": 8,
+        "exit_reasons": {
+          "TP": 7,
+          "TimeStop": 4,
+          "TP2": 1,
+          "SL": 9
+        }
+      },
+      "v5_exit_reasons": {
+        "TP": 7,
+        "TimeStop": 4,
+        "TP2": 1,
+        "SL": 9
+      },
+      "v5_partial_trades": 8
+    },
+    "ETHUSDT": {
+      "baseline": {
+        "symbol": "ETHUSDT",
+        "status": "success",
+        "engine": "v4.1-baseline",
+        "initial_capital": 10000.0,
+        "final_capital": 10108.983824327954,
+        "total_return_pct": 1.089838243279537,
+        "buy_hold_return_pct": 43.91245737847911,
+        "total_trades": 36,
+        "wins": 20,
+        "losses": 16,
+        "win_rate_pct": 55.55555555555556,
+        "avg_win": 16.19802668080765,
+        "avg_loss": -13.436044330512534,
+        "avg_win_pct": 3.2141537152489823,
+        "avg_loss_pct": 2.6445474261748654,
+        "payoff_ratio": 1.2153889483835079,
+        "expectancy_pct_per_trade": 0.6102865412828274,
+        "profit_factor": 1.506956426530129,
+        "max_drawdown_pct": 1.6137121675803963,
+        "fee_pct_per_side": 0.1,
+        "partial_tp_trades": 0,
+        "exit_reasons": {
+          "TP": 20,
+          "SL": 16
+        }
+      },
+      "v5": {
+        "symbol": "ETHUSDT",
+        "status": "success",
+        "engine": "v5",
+        "initial_capital": 10000.0,
+        "final_capital": 10091.41948265218,
+        "total_return_pct": 0.914194826521798,
+        "buy_hold_return_pct": 43.91245737847911,
+        "total_trades": 18,
+        "wins": 12,
+        "losses": 6,
+        "win_rate_pct": 66.66666666666666,
+        "avg_win": 11.027684572439965,
+        "avg_loss": -6.818788702849631,
+        "avg_win_pct": 2.198446471009461,
+        "avg_loss_pct": 1.3549367178542397,
+        "payoff_ratio": 1.622545497542538,
+        "expectancy_pct_per_trade": 1.013985408054894,
+        "profit_factor": 3.2344995725799217,
+        "max_drawdown_pct": 0.5402194572978202,
+        "fee_pct_per_side": 0.1,
+        "partial_tp_trades": 7,
+        "exit_reasons": {
+          "TimeStop": 3,
+          "SL": 10,
+          "TP2": 1,
+          "TP": 4
+        }
+      },
+      "v5_exit_reasons": {
+        "TimeStop": 3,
+        "SL": 10,
+        "TP2": 1,
+        "TP": 4
+      },
+      "v5_partial_trades": 7
+    },
+    "SOLUSDT": {
+      "baseline": {
+        "symbol": "SOLUSDT",
+        "status": "success",
+        "engine": "v4.1-baseline",
+        "initial_capital": 10000.0,
+        "final_capital": 10266.089373267381,
+        "total_return_pct": 2.660893732673812,
+        "buy_hold_return_pct": 55.752330226364855,
+        "total_trades": 41,
+        "wins": 25,
+        "losses": 16,
+        "win_rate_pct": 60.97560975609756,
+        "avg_win": 21.1019175842456,
+        "avg_loss": -16.341160396172448,
+        "avg_win_pct": 4.168851775939874,
+        "avg_loss_pct": 3.2052134736327,
+        "payoff_ratio": 1.3006471519711333,
+        "expectancy_pct_per_trade": 1.2911677761066744,
+        "profit_factor": 2.0177114370107185,
+        "max_drawdown_pct": 1.226742121189411,
+        "fee_pct_per_side": 0.1,
+        "partial_tp_trades": 0,
+        "exit_reasons": {
+          "TP": 25,
+          "SL": 16
+        }
+      },
+      "v5": {
+        "symbol": "SOLUSDT",
+        "status": "success",
+        "engine": "v5",
+        "initial_capital": 10000.0,
+        "final_capital": 10159.961702683355,
+        "total_return_pct": 1.5996170268335483,
+        "buy_hold_return_pct": 55.752330226364855,
+        "total_trades": 21,
+        "wins": 15,
+        "losses": 6,
+        "win_rate_pct": 71.42857142857143,
+        "avg_win": 14.379858512943136,
+        "avg_loss": -9.289362501799255,
+        "avg_win_pct": 2.857257983424923,
+        "avg_loss_pct": 1.8397498810478883,
+        "payoff_ratio": 1.5530687148611095,
+        "expectancy_pct_per_trade": 1.515255736432691,
+        "profit_factor": 3.869979912549946,
+        "max_drawdown_pct": 0.7401562236711383,
+        "fee_pct_per_side": 0.1,
+        "partial_tp_trades": 8,
+        "exit_reasons": {
+          "TP": 6,
+          "TP2": 1,
+          "SL": 9,
+          "TimeStop": 2,
+          "StructFlip": 1,
+          "MaxHolding": 2
+        }
+      },
+      "v5_exit_reasons": {
+        "TP": 6,
+        "TP2": 1,
+        "SL": 9,
+        "TimeStop": 2,
+        "StructFlip": 1,
+        "MaxHolding": 2
+      },
+      "v5_partial_trades": 8
+    }
+  }
+}

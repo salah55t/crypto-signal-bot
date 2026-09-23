@@ -17,12 +17,14 @@ class SignalScheduler:
 
     def add_job(self, func: Callable, cron: Optional[str] = None,
                 job_id: str = "analyze") -> None:
-        """Add a scheduled job."""
+        """Add a scheduled job (v5: never overlapping instances)."""
         cron = cron or settings.SCHEDULE_CRON
         trigger = CronTrigger.from_crontab(cron)
         self.scheduler.add_job(
             func, trigger=trigger, id=job_id, name=job_id,
             misfire_grace_time=300,  # allow 5 min late
+            max_instances=1,         # never run the same job twice at once
+            coalesce=True,           # collapse missed runs into one
         )
         log.info(f"[green]Job added[/]: {job_id} (cron: '{cron}')")
 

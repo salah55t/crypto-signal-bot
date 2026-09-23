@@ -228,7 +228,14 @@ class SignalScorer:
             current_price=current_price,
             min_rr=min_rr,
             veto_enabled=settings.CONFLUENCE_VETO_ENABLED,
+            strategy_confluence=verdict.get("confluence", 0.0),
         )
+
+        # v5 veteran filters: chaotic candles + dead markets are skipped
+        # BEFORE they can become bad trades (ATR% of price, primary TF).
+        atr_pct_total = atr_pct * 100
+        volatility_extreme = atr_pct_total > settings.ATR_PCT_MAX
+        dead_market = atr_pct_total < settings.ATR_PCT_MIN
 
         return {
             "symbol": symbol,
@@ -242,6 +249,12 @@ class SignalScorer:
             "admission_confidence": float(
                 min(decision["base_confidence"], decision["confidence"])
             ),
+            # v5: layered harmony (regime+cycle+zone+strategies, 0..1)
+            "harmony": decision.get("harmony", 0.0),
+            "a_plus": decision.get("a_plus", False),
+            "volatility_extreme": bool(volatility_extreme),
+            "dead_market": bool(dead_market),
+            "atr_pct_total": float(atr_pct_total),
             "avg_strength": verdict["avg_strength"],
             "confluence": verdict["confluence"],
             "current_price": current_price,
@@ -296,9 +309,12 @@ class SignalScorer:
         """
         Filter and rank recommendations by criteria.
         Uses MIN_RR_RATIO from settings (no more hardcoded values).
-        Ranking = confidence + bonus for R/R (capped at 3) so that a slightly
-        lower-confidence signal with an excellent R/R can outrank a weaker
-        setup — this directly improves expected yield per trade.
+
+        v5 veteran gates:
+          - harmony >= MIN_HARMONY (layered agreement, not one loud layer)
+          - volatility_extreme / dead_market symbols are dropped
+        Ranking = confidence + R/R bonus (capped 5) + harmony bonus (capped 4)
+        so complete setups outrank louder-but-lonesome signals.
         """
         from config.settings import settings
 
@@ -310,10 +326,18 @@ class SignalScorer:
                       r.get("confidence", 0)) >= min_confidence
             and r.get("expected_rise_pct", 0) >= min_expected_rise
             and r.get("risk_reward_ratio", 0) >= settings.MIN_RR_RATIO
+            and r.get("harmony", 0.0) >= settings.MIN_HARMONY
+            and not (settings.EXCLUDE_VOLATILITY_EXTREME
+                     and r.get("volatility_extreme", False))
+            and not r.get("dead_market", False)
         ]
-        # Composite rank: confidence + up to +5 for great R/R
+        # Composite rank: confidence + up to +5 for great R/R + up to +4 harmony
         filtered.sort(
-            key=lambda r: r.get("confidence", 0) + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0,
+            key=lambda r: (
+                r.get("confidence", 0)
+                + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0
+                + 4.0 * min(r.get("harmony", 0.0), 1.0)
+            ),
             reverse=True,
         )
         return filtered

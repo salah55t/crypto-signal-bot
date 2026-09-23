@@ -26,6 +26,15 @@ Decision rules:
      entry in the Fibonacci golden pocket + Fib x S/R
      confluence on entry                                -> +8 extra & flag
 
+v5 HARMONY SCORE (0..1) — "would a veteran take this trade?":
+  Weighted agreement across ALL layers:
+    regime alignment            0.35
+    elliott cycle favorability  0.25
+    entry zone quality          0.20
+    strategy confluence x 0.20
+  The harmony score becomes a separate ADMISSION gate (MIN_HARMONY) and a
+  ranking factor: a veteran demands LAYERED agreement, not one loud layer.
+
 The adjusted confidence replaces the base confidence in the final
 recommendation; vetoed signals are excluded from filtering, Telegram
 and position management.
@@ -48,6 +57,17 @@ ELLIOTT_COUNTER_PENALTY = -10.0  # trading against the dominant cycle
 # --- A+ setup bonus ---
 A_PLUS_BONUS = 8.0
 A_PLUS_MIN_ELLIOTT_CONF = 0.6
+A_PLUS_MIN_HARMONY = 0.75
+
+# --- v5 harmony weights (must sum to ~1.0) ---
+H_REGIME_ALIGNED = 0.35
+H_REGIME_NEUTRAL = 0.15
+H_ELLIOTT_FAVORED = 0.25
+H_ELLIOTT_WAVE4 = 0.20
+H_ELLIOTT_UNCLEAR = 0.05
+H_ZONE_QUALITY = 0.20
+H_ZONE_DECENT = 0.10
+H_STRATEGY_CONFLUENCE = 0.20
 
 
 def _pattern_aligned(direction: str, pattern: str) -> bool:
@@ -66,7 +86,8 @@ class ConfluenceEngine:
                  ichimoku: Optional[Dict], elliott: Optional[Dict],
                  fib: Optional[Dict], sl_tp: Dict,
                  current_price: float, min_rr: float = 1.5,
-                 veto_enabled: bool = True) -> Dict:
+                 veto_enabled: bool = True,
+                 strategy_confluence: float = 0.0) -> Dict:
         """
         Returns:
           base_confidence   original strategy-model confidence
@@ -75,6 +96,7 @@ class ConfluenceEngine:
           veto_reason       why the signal was vetoed
           adjustments       human-readable list of applied adjustments
           a_plus            True when the setup qualifies as A+
+          harmony           v5 layered-agreement score 0..1
           elliott_target    wave-5 projection promoted to TP2 (or None)
           elliott_target_label
         """
@@ -86,6 +108,7 @@ class ConfluenceEngine:
         a_plus = False
         ell_target = None
         ell_target_label = None
+        harmony = 0.0
 
         elliott = elliott or {}
         fib = fib or {}
@@ -94,18 +117,28 @@ class ConfluenceEngine:
         ell_conf = float(elliott.get("wave_confidence", 0.0))
 
         # ---------------------------------------------------------
+        # 0) HARMONY LAYER TRACKING (v5)
+        # ---------------------------------------------------------
+        regime_aligned = False
+        regime_neutral = False
+        elliott_favored = 0.0   # points 0..0.25
+        zone_quality = 0.0      # points 0..0.20
+
+        # ---------------------------------------------------------
         # 1) ICHIMOKU REGIME GATE
         # ---------------------------------------------------------
         if ichimoku:
             regime = ichimoku.get("regime")
             if regime == direction:
                 adjusted *= REGIME_ALIGNED_MULT
+                regime_aligned = True
                 adjustments.append(
                     f"Ichimoku regime aligned ({regime}) "
                     f"x{REGIME_ALIGNED_MULT:.2f}"
                 )
             elif regime == "neutral":
                 adjusted *= REGIME_NEUTRAL_MULT
+                regime_neutral = True
                 adjustments.append(
                     f"Price inside Ichimoku cloud (chop) "
                     f"x{REGIME_NEUTRAL_MULT:.2f}"
@@ -131,6 +164,7 @@ class ConfluenceEngine:
             if pattern in ("wave3_up", "wave3_down"):
                 if _pattern_aligned(direction, pattern):
                     adjusted += ELLIOTT_WAVE3_BONUS
+                    elliott_favored = H_ELLIOTT_FAVORED
                     adjustments.append(
                         f"Elliott wave 3 in progress +"
                         f"{ELLIOTT_WAVE3_BONUS:.0f} (strongest phase)"
@@ -138,6 +172,7 @@ class ConfluenceEngine:
             elif pattern in ("partial_impulse_up", "partial_impulse_down"):
                 if _pattern_aligned(direction, pattern) and wave == "4":
                     adjusted += ELLIOTT_WAVE4_BONUS
+                    elliott_favored = H_ELLIOTT_WAVE4
                     adjustments.append(
                         f"Elliott wave 4 pullback +"
                         f"{ELLIOTT_WAVE4_BONUS:.0f} (wave 5 ahead)"
@@ -164,6 +199,7 @@ class ConfluenceEngine:
                 # bullish reversal setup when C is complete
                 if direction == "bullish" and wave == "C (complete)":
                     adjusted += ELLIOTT_ABC_BONUS
+                    elliott_favored = H_ELLIOTT_FAVORED
                     adjustments.append(
                         f"ABC correction complete +"
                         f"{ELLIOTT_ABC_BONUS:.0f} (new cycle starting)"
@@ -183,6 +219,7 @@ class ConfluenceEngine:
             elif pattern == "correction_after_down":
                 if direction == "bearish" and wave == "C (complete)":
                     adjusted += ELLIOTT_ABC_BONUS
+                    elliott_favored = H_ELLIOTT_FAVORED
                     adjustments.append(
                         f"ABC bounce complete +"
                         f"{ELLIOTT_ABC_BONUS:.0f} (down cycle resuming)"
@@ -224,10 +261,10 @@ class ConfluenceEngine:
                 ell_target_label = "Elliott wave 5 projection"
 
         # ---------------------------------------------------------
-        # 3) A+ SETUP DETECTION
+        # 3) A+ SETUP DETECTION (v5: also requires layered harmony)
         # ---------------------------------------------------------
         if not vetoed and ichimoku and pattern != "unclear":
-            regime_aligned = ichimoku.get("regime") == direction
+            regime_aligned_a = ichimoku.get("regime") == direction
             elliott_ok = (
                 ell_conf >= A_PLUS_MIN_ELLIOTT_CONF
                 and (
@@ -247,12 +284,42 @@ class ConfluenceEngine:
             golden_ok = self._entry_in_golden_pocket(sl_tp, fib)
             sr_ok = "confluence" in (sl_tp.get("entry_label", "") or "")
 
-            if regime_aligned and elliott_ok and (golden_ok or sr_ok):
+            if regime_aligned_a and elliott_ok and (golden_ok or sr_ok):
                 adjusted += A_PLUS_BONUS
                 a_plus = True
                 adjustments.append(
                     f"A+ SETUP +{A_PLUS_BONUS:.0f} "
                     f"(regime + cycle + zones all aligned)"
+                )
+
+        # ---------------------------------------------------------
+        # 3b) HARMONY SCORE (v5) — layered agreement 0..1
+        # ---------------------------------------------------------
+        if not vetoed:
+            zone_quality = (
+                H_ZONE_QUALITY
+                if (self._entry_in_golden_pocket(sl_tp, fib)
+                    or "confluence" in (sl_tp.get("entry_label", "") or ""))
+                else (H_ZONE_DECENT if sl_tp.get("entry_zone") else 0.0)
+            )
+            if pattern == "unclear":
+                elliott_harmony = H_ELLIOTT_UNCLEAR
+            else:
+                elliott_harmony = elliott_favored
+            harmony = (
+                (H_REGIME_ALIGNED if regime_aligned
+                 else (H_REGIME_NEUTRAL if regime_neutral else 0.0))
+                + elliott_harmony
+                + zone_quality
+                + H_STRATEGY_CONFLUENCE * max(0.0, min(1.0, strategy_confluence))
+            )
+            harmony = max(0.0, min(1.0, harmony))
+            if a_plus and harmony < A_PLUS_MIN_HARMONY:
+                # An A+ label with weak layered agreement is an illusion:
+                # keep the bonus out of admission decisions via harmony gate.
+                adjustments.append(
+                    f"Harmony {harmony:.2f} below A+ bar "
+                    f"{A_PLUS_MIN_HARMONY:.2f} (setup is 2-layer, not 3-layer)"
                 )
 
         # ---------------------------------------------------------
@@ -276,6 +343,7 @@ class ConfluenceEngine:
             "veto_reason": veto_reason,
             "adjustments": adjustments,
             "a_plus": a_plus,
+            "harmony": float(harmony),
             "elliott_target": ell_target,
             "elliott_target_label": ell_target_label,
         }

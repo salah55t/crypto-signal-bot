@@ -149,7 +149,7 @@ async def get_recommendations():
 
 @app.get("/api/positions")
 async def get_positions():
-    """Get open positions with real-time P&L."""
+    """Get open positions with real-time P&L + v5 tracking fields."""
     from src.risk.manager import risk_manager
     from src.core.data_fetcher import data_fetcher
     positions = risk_manager.open_positions
@@ -166,6 +166,16 @@ async def get_positions():
         log.error(f"Failed to fetch prices for positions: {e}")
         current_prices = {}
     return risk_manager.get_positions_with_pnl(current_prices)
+
+
+@app.get("/api/pending")
+async def get_pending_entries():
+    """v5: armed pending LIMIT entries waiting for their entry zone."""
+    from src.risk.manager import risk_manager
+    return [
+        {k: v for k, v in p.items() if k != "rec"}
+        for p in risk_manager.pending_entries
+    ]
 
 
 @app.get("/api/all-analyses")
@@ -488,174 +498,15 @@ async def watch_recommendations_file():
 
 
 def run_bot_cycle_sync():
-    """Run one bot analysis cycle synchronously (called from scheduler)."""
+    """Run one bot analysis cycle synchronously (called from scheduler).
+
+    v5: delegates to the unified cycle module so the web dashboard and the
+    standalone runner behave IDENTICALLY (the old duplicated copy here was
+    missing v4.1 gates and v5 veteran management).
+    """
     try:
-        log.info("=" * 60)
-        log.info("[bold cyan]SCHEDULED ANALYSIS CYCLE STARTING[/]")
-        log.info("=" * 60)
-        # Import inside function to avoid circular import on startup
-        from src.core.binance_client import binance_client
-        from src.core.data_fetcher import data_fetcher
-        from src.analysis.analyzer import analyzer
-        from src.notifications import file_logger, telegram_notifier
-        from src.risk.manager import risk_manager
-
-        if not binance_client.ping():
-            log.error("Cannot reach Binance API")
-            return
-
-        # STEP 1: Check existing positions for SL/TP hits + apply trailing
-        # This applies the SAME logic to paper and live positions
-        if risk_manager.open_positions:
-            log.info("[cyan]Checking open positions for SL/TP hits...[/]")
-            try:
-                pos_symbols = list({p["symbol"] for p in risk_manager.open_positions})
-                tickers = data_fetcher.get_batch_tickers(pos_symbols)
-                current_prices = {
-                    sym: float(t.get("lastPrice", 0)) for sym, t in tickers.items()
-                }
-                # Close positions that hit SL/TP (SAME logic for paper and live)
-                closed = risk_manager.check_open_positions(current_prices)
-                for c in closed:
-                    log.info(f"[yellow]Position closed[/] {c['symbol']} - "
-                             f"PnL: ${c.get('pnl', 0):+.2f} - {c.get('reason', '')}")
-                    # Send Telegram notification for closed position
-                    if telegram_notifier.enabled:
-                        win_emoji = "✅" if c.get("pnl", 0) > 0 else "❌"
-                        telegram_notifier.send_alert(
-                            f"Position Closed {win_emoji}",
-                            f"Symbol: {c['symbol']}\n"
-                            f"Entry: {c.get('entry_price')}\n"
-                            f"Exit: {c.get('exit_price')}\n"
-                            f"PnL: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
-                            f"Reason: {c.get('reason', '')}\n"
-                            f"Mode: {'PAPER' if c.get('paper', True) else 'LIVE'}"
-                        )
-                # Save closed trades history
-                if closed:
-                    closed_file = DATA_DIR / "closed_trades.json"
-                    existing_closed = load_json(closed_file, default=[])
-                    existing_closed.extend(closed)
-                    save_json(to_json_safe(existing_closed), closed_file)
-            except Exception as e:
-                log.error(f"Position check failed: {e}")
-
-        # STEP 2: Run market analysis
-        recs = analyzer.analyze_all(parallel=True, max_workers=settings.MAX_WORKERS)
-        if not recs:
-            log.info("No strong signals in this cycle.")
-            # Still try to update trailing stops on existing positions
-            if risk_manager.open_positions:
-                try:
-                    pos_symbols = list({p["symbol"] for p in risk_manager.open_positions})
-                    tickers = data_fetcher.get_batch_tickers(pos_symbols)
-                    current_prices = {
-                        sym: float(t.get("lastPrice", 0)) for sym, t in tickers.items()
-                    }
-                    # Build market signals dict from full results
-                    full_data = load_json(RECOMMENDATIONS_FILE, default={})
-                    market_signals = {}
-                    for r in full_data.get("all_results", []):
-                        market_signals[r["symbol"]] = r
-                    # Apply trailing logic to ALL positions (paper + live, same logic)
-                    updates = risk_manager.apply_trailing_logic(current_prices, market_signals)
-                    for u in updates:
-                        log.info(f"[blue]Risk update[/] {u.get('reason', '')}")
-                        # Send Telegram for significant updates
-                        if telegram_notifier.enabled:
-                            telegram_notifier.send_alert(
-                                f"Risk Update 🔧 {u.get('symbol', '')}",
-                                f"{u.get('reason', '')}\n"
-                                f"Old SL: {u.get('old_sl')}\n"
-                                f"New SL: {u.get('new_sl')}\n"
-                                f"Old TP: {u.get('old_tp')}\n"
-                                f"New TP: {u.get('new_tp')}"
-                            )
-                except Exception as e:
-                    log.error(f"Trailing update failed: {e}")
-            return
-
-        # STEP 3: Log + notify
-        file_logger.log_recommendations(recs)
-        telegram_notifier.send_recommendations(recs)
-
-        # STEP 4: Apply trailing stops on existing positions (using new analysis signals)
-        # This applies the SAME dynamic SL/TP adjustment to paper and live positions
-        if risk_manager.open_positions:
-            try:
-                pos_symbols = list({p["symbol"] for p in risk_manager.open_positions})
-                tickers = data_fetcher.get_batch_tickers(pos_symbols)
-                current_prices = {
-                    sym: float(t.get("lastPrice", 0)) for sym, t in tickers.items()
-                }
-                # Build market signals dict from current analysis results
-                full_data = load_json(RECOMMENDATIONS_FILE, default={})
-                market_signals = {}
-                for r in full_data.get("all_results", []):
-                    market_signals[r["symbol"]] = r
-                # Apply trailing logic (SAME for paper and live)
-                updates = risk_manager.apply_trailing_logic(current_prices, market_signals)
-                for u in updates:
-                    log.info(f"[blue]Risk update applied[/] - {u.get('reason', '')}")
-                    if telegram_notifier.enabled:
-                        telegram_notifier.send_alert(
-                            f"Risk Update 🔧 {u.get('symbol', '')}",
-                            f"{u.get('reason', '')}\n"
-                            f"Old SL: {u.get('old_sl')} → New SL: {u.get('new_sl')}\n"
-                            f"Old TP: {u.get('old_tp')} → New TP: {u.get('new_tp')}"
-                        )
-            except Exception as e:
-                log.error(f"Trailing update failed: {e}")
-
-        # STEP 5: Open new positions (paper or live, same logic)
-        # All top 5 recommendations become positions (up to MAX_OPEN_POSITIONS=5)
-        opened_count = 0
-        for rec in recs:
-            if risk_manager.can_open_position():
-                result = risk_manager.open_position(rec)
-                if result.get("status") == "opened":
-                    opened_count += 1
-                    # Send Telegram notification for position opened
-                    if telegram_notifier.enabled:
-                        pos = result.get("position", {})
-                        telegram_notifier.send_alert(
-                            f"✅ Position Opened #{opened_count}",
-                            f"Symbol: {pos.get('symbol')}\n"
-                            f"Entry: ${pos.get('entry_price', 0):.4f}\n"
-                            f"Size: {pos.get('size', 0):.6f} (${pos.get('notional_usd', 0):.2f})\n"
-                            f"SL: ${pos.get('stop_loss', 0):.4f}\n"
-                            f"TP: ${pos.get('take_profit', 0):.4f}\n"
-                            f"Entry fee: ${pos.get('entry_fee', 0):.4f}\n"
-                            f"Mode: {'PAPER' if pos.get('paper', True) else 'LIVE'}"
-                        )
-            else:
-                log.info(f"[yellow]Max open positions reached ({settings.MAX_OPEN_POSITIONS})[/]")
-                break
-        if opened_count:
-            log.info(f"[green]Opened {opened_count} new positions (total open: {len(risk_manager.open_positions)})[/]")
-
-        # STEP 6: Run bottom scanner (find coins near lows with bounce signals)
-        try:
-            from src.analysis.bottom_scanner import bottom_scanner
-            log.info("[cyan]Running bottom scanner...[/]")
-            bottom_candidates = bottom_scanner.scan(max_candidates=20, limit=200)
-            log.info(f"[green]Bottom scan complete[/] - {len(bottom_candidates)} candidates found")
-            # Also send top 3 to Telegram
-            if bottom_candidates and telegram_notifier.enabled:
-                msg = "*🔍 Bottom Scanner - Top 5 Candidates*\n\n"
-                for i, c in enumerate(bottom_candidates[:5], 1):
-                    msg += (
-                        f"{i}. `{c['symbol']}` — Score: `{c['score']:.0f}`\n"
-                        f"   💰 Price: `{c['current_price']:.4f}` | "
-                        f"📉 Low: `{c['recent_low']:.4f}` ({c['distance_from_low_pct']:.1f}%)\n"
-                        f"   📊 RSI: `{c['rsi']:.0f}`\n"
-                        f"   Top signals: {'; '.join(c['signals'][:2])}\n\n"
-                    )
-                telegram_notifier.send(msg)
-        except Exception as e:
-            log.error(f"Bottom scan failed: {e}")
-
-        log.info("[green]Scheduled cycle complete[/]")
+        from src.core.cycle import run_analysis_cycle
+        run_analysis_cycle()
     except Exception as e:
         log.exception(f"Bot cycle error: {e}")
 
@@ -663,50 +514,12 @@ def run_bot_cycle_sync():
 def monitor_positions_sync():
     """
     Fast position monitor - runs every 1 minute.
-    Checks SL/TP for all open positions (paper AND live, same logic).
-    Does NOT run analysis - only monitors existing positions.
+    v5: delegates to the unified watcher: SL/TP/partial + chandelier trailing
+    + MFE/MAE tracking + time stop + pending limit-entry fills. Price-only.
     """
     try:
-        from src.risk.manager import risk_manager
-        from src.core.data_fetcher import data_fetcher
-        from src.notifications import telegram_notifier
-
-        if not risk_manager.open_positions:
-            return  # Nothing to monitor
-
-        # Fetch current prices for all open position symbols
-        pos_symbols = list({p["symbol"] for p in risk_manager.open_positions})
-        try:
-            tickers = data_fetcher.get_batch_tickers(pos_symbols)
-            current_prices = {
-                sym: float(t.get("lastPrice", 0)) for sym, t in tickers.items()
-            }
-        except Exception as e:
-            log.debug(f"Position monitor: price fetch failed: {e}")
-            return
-
-        # Check SL/TP hits (SAME logic for paper and live)
-        closed = risk_manager.check_open_positions(current_prices)
-        for c in closed:
-            log.info(f"[yellow]Position closed (monitor)[/] {c['symbol']} - "
-                     f"PnL: ${c.get('pnl', 0):+.2f} - {c.get('reason', '')}")
-            if telegram_notifier.enabled:
-                win_emoji = "✅" if c.get("pnl", 0) > 0 else "❌"
-                telegram_notifier.send_alert(
-                    f"Position Closed {win_emoji}",
-                    f"Symbol: {c['symbol']}\n"
-                    f"PnL: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
-                    f"Reason: {c.get('reason', '')}\n"
-                    f"Mode: {'PAPER' if c.get('paper', True) else 'LIVE'}"
-                )
-
-        if closed:
-            # Save closed trades history
-            closed_file = DATA_DIR / "closed_trades.json"
-            existing_closed = load_json(closed_file, default=[])
-            existing_closed.extend(closed)
-            save_json(to_json_safe(existing_closed), closed_file)
-            log.info(f"[cyan]Monitor: {len(closed)} positions closed (paper/live same logic)[/]")
+        from src.core.cycle import run_position_watch
+        run_position_watch()
     except Exception as e:
         log.debug(f"Position monitor error: {e}")
 

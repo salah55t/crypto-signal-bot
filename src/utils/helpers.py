@@ -7,6 +7,8 @@ from typing import Any
 import pandas as pd
 import numpy as np
 
+from src.utils.logger import log
+
 
 class NumpyEncoder(json.JSONEncoder):
     """JSON encoder that handles numpy types."""
@@ -82,14 +84,30 @@ def fmt_pct(p: float) -> str:
 
 
 def retry_on_failure(func, retries: int = 3, delay: float = 1.0, exceptions=(Exception,)):
-    """Retry a function on failure. Works as decorator (preserves args)."""
+    """Retry a function on failure. Works as decorator (preserves args).
+
+    v5: Binance 429 (RateLimitError) gets special treatment - the rate
+    limiter already applied a global cooldown, so retry FEWER times with a
+    LONG delay instead of hammering the API into an IP ban.
+    """
     import functools
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        from src.core.rate_limiter import RateLimitError, rate_limiter
         last_exc = None
         for attempt in range(retries):
             try:
                 return func(*args, **kwargs)
+            except RateLimitError as e:
+                # Cooldown is already active inside the limiter; wait it out.
+                last_exc = e
+                backoff = max(15.0, rate_limiter._cooldown_until - time.monotonic() + 1.0)
+                log.warning(
+                    f"Rate-limited on {getattr(func, '__name__', 'call')} "
+                    f"(attempt {attempt + 1}/{retries}) - backing off {backoff:.0f}s"
+                )
+                if attempt < retries - 1:
+                    time.sleep(min(backoff, 45.0))
             except exceptions as e:
                 last_exc = e
                 time.sleep(delay * (attempt + 1))

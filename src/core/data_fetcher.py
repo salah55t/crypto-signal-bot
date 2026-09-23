@@ -1,7 +1,13 @@
-"""Data fetcher - retrieves and formats market data from Binance."""
+"""Data fetcher - retrieves and formats market data from Binance.
+
+v5: order book snapshots are cached with a TTL (weight 5 per fetch) and
+24h tickers use the batched price endpoint when only prices are needed.
+"""
+import time
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
+from config.settings import settings
 from src.core.binance_client import binance_client
 from src.utils.logger import log
 from src.utils.helpers import retry_on_failure
@@ -12,6 +18,11 @@ class DataFetcher:
 
     INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
                  "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+
+    def __init__(self):
+        # v5: {symbol: (monotonic_ts, order_book_dict)} - cuts order book
+        # weight from 5/symbol/cycle to 5/symbol/TTL (30 min default).
+        self._ob_cache: Dict[str, tuple] = {}
 
     @staticmethod
     def klines_to_df(raw_klines: List[List]) -> pd.DataFrame:
@@ -61,16 +72,30 @@ class DataFetcher:
     @staticmethod
     @retry_on_failure
     def get_order_book(symbol: str, limit: int = 20) -> Dict:
-        """Get order book with computed metrics."""
+        """Get order book with computed metrics (v5: TTL-cached)."""
+        return DataFetcher._get_order_book_cached(symbol, limit)
+
+    @classmethod
+    def _get_order_book_cached(cls, symbol: str, limit: int) -> Dict:
+        """Return a cached snapshot when fresh enough (liquidity moves slowly)."""
+        inst = data_fetcher
+        ttl = max(1, settings.ORDER_BOOK_TTL_MIN) * 60
+        now = time.monotonic()
+        cached = inst._ob_cache.get(symbol)
+        if cached and (now - cached[0]) < ttl:
+            return cached[1]
         ob = binance_client.get_order_book(symbol, limit)
         bids = pd.DataFrame(ob.get("bids", []), columns=["price", "qty"], dtype=float)
         asks = pd.DataFrame(ob.get("asks", []), columns=["price", "qty"], dtype=float)
-        return {
+        result = {
             "symbol": symbol,
             "bids": bids,
             "asks": asks,
             "last_update_id": ob.get("lastUpdateId"),
+            "cached": bool(cached),
         }
+        inst._ob_cache[symbol] = (now, result)
+        return result
 
     @staticmethod
     @retry_on_failure
@@ -79,12 +104,31 @@ class DataFetcher:
         return binance_client.get_ticker(symbol)
 
     @staticmethod
-    @retry_on_failure
     def get_batch_tickers(symbols: List[str]) -> Dict[str, Dict]:
-        """Get 24h tickers for many symbols in one call."""
+        """Get 24h tickers for many symbols.
+        v5: uses the batched /ticker/price endpoint (weight 2-4 total)
+        instead of the full-market /ticker/24hr call (weight 80).
+        """
+        if not symbols:
+            return {}
+        try:
+            return binance_client.get_tickers_batch(symbols)
+        except Exception as e:
+            log.warning(f"Batch ticker fetch failed ({e}) - falling back to full market")
         all_t = binance_client.get_all_tickers()
         sym_set = set(symbols)
         return {t["symbol"]: t for t in all_t if t["symbol"] in sym_set}
+
+    @staticmethod
+    def get_batch_prices(symbols: List[str]) -> Dict[str, float]:
+        """v5: {symbol: lastPrice} for a symbol list - 1 request, weight 2-4."""
+        out = {}
+        for sym, t in DataFetcher.get_batch_tickers(symbols).items():
+            try:
+                out[sym] = float(t.get("lastPrice", t.get("price", 0)))
+            except (TypeError, ValueError):
+                continue
+        return out
 
 
 # Singleton
