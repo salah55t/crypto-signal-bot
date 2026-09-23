@@ -198,7 +198,7 @@ class Backtester:
 
             # chandelier trailing
             if (settings.CHANDELIER_ENABLED and atr_val and atr_val > 0
-                    and profit_pct >= 1.0):
+                    and profit_pct >= settings.CHANDELIER_ACTIVATE_PCT):
                 if pos["direction"] == "bullish":
                     chand = pos["peak_price"] - settings.CHANDELIER_ATR_MULT * atr_val
                     chand = min(chand, current_price * 0.999)

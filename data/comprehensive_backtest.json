@@ -1,0 +1,746 @@
+{
+  "config": {
+    "symbols_1h": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "BNBUSDT",
+      "SOLUSDT",
+      "XRPUSDT",
+      "ADAUSDT",
+      "AVAXUSDT",
+      "DOTUSDT",
+      "LINKUSDT",
+      "UNIUSDT",
+      "AAVEUSDT",
+      "ATOMUSDT",
+      "ARBUSDT",
+      "OPUSDT",
+      "APTUSDT",
+      "SUIUSDT",
+      "INJUSDT",
+      "DOGEUSDT"
+    ],
+    "symbols_15m": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "XRPUSDT",
+      "DOGEUSDT",
+      "ARBUSDT",
+      "INJUSDT",
+      "SUIUSDT"
+    ],
+    "bars_1h": 3000,
+    "bars_15m": 2000,
+    "window": 100,
+    "warmup": 100,
+    "capital": 10000.0,
+    "min_confidence": 68.0,
+    "min_rr": 1.5,
+    "min_harmony": 0.45,
+    "fee_pct": 0.1
+  },
+  "aggregate_all": {
+    "baseline": {
+      "runs": 26,
+      "trades": 2034,
+      "win_rate_pct": 46.0,
+      "profit_factor": 1.2,
+      "expectancy_pct_per_trade": 0.319,
+      "avg_max_dd_pct": 2.34,
+      "avg_return_pct": 1.29
+    },
+    "v5": {
+      "runs": 26,
+      "trades": 1111,
+      "win_rate_pct": 45.6,
+      "profit_factor": 1.68,
+      "expectancy_pct_per_trade": 0.603,
+      "avg_max_dd_pct": 0.99,
+      "avg_return_pct": 1.27
+    }
+  },
+  "aggregate_1h_only": {
+    "baseline": {
+      "runs": 18,
+      "trades": 1516,
+      "win_rate_pct": 45.4,
+      "profit_factor": 1.22,
+      "expectancy_pct_per_trade": 0.385,
+      "avg_max_dd_pct": 2.69,
+      "avg_return_pct": 1.63
+    },
+    "v5": {
+      "runs": 18,
+      "trades": 824,
+      "win_rate_pct": 46.4,
+      "profit_factor": 1.83,
+      "expectancy_pct_per_trade": 0.815,
+      "avg_max_dd_pct": 1.12,
+      "avg_return_pct": 1.75
+    }
+  },
+  "aggregate_15m_only": {
+    "baseline": {
+      "runs": 8,
+      "trades": 518,
+      "win_rate_pct": 47.7,
+      "profit_factor": 1.14,
+      "expectancy_pct_per_trade": 0.17,
+      "avg_max_dd_pct": 1.54,
+      "avg_return_pct": 0.5
+    },
+    "v5": {
+      "runs": 8,
+      "trades": 287,
+      "win_rate_pct": 43.6,
+      "profit_factor": 1.15,
+      "expectancy_pct_per_trade": 0.127,
+      "avg_max_dd_pct": 0.7,
+      "avg_return_pct": 0.19
+    }
+  },
+  "exit_class_table": {
+    "SL_initial": {
+      "count": 558,
+      "avg_pnl_pct": -1.006,
+      "share_pct": 50.2
+    },
+    "TimeStop": {
+      "count": 128,
+      "avg_pnl_pct": -0.546,
+      "share_pct": 11.5
+    },
+    "SL_protected": {
+      "count": 80,
+      "avg_pnl_pct": 2.938,
+      "share_pct": 7.2
+    },
+    "TP": {
+      "count": 195,
+      "avg_pnl_pct": 4.731,
+      "share_pct": 17.6
+    },
+    "MaxHolding": {
+      "count": 14,
+      "avg_pnl_pct": 4.238,
+      "share_pct": 1.3
+    },
+    "TP2": {
+      "count": 42,
+      "avg_pnl_pct": 4.081,
+      "share_pct": 3.8
+    },
+    "StructFlip": {
+      "count": 94,
+      "avg_pnl_pct": -1.055,
+      "share_pct": 8.5
+    }
+  },
+  "sl_stats": {
+    "sl_initial_count": 558,
+    "sl_initial_share_pct": 50.2,
+    "sl_initial_avg_loss_pct": -1.006,
+    "sl_initial_avg_bars_held": 11.3,
+    "sl_initial_mfe_before_exit_avg_pct": 2.107,
+    "sl_protected_count": 80,
+    "sl_protected_avg_pnl_pct": 2.938,
+    "sl_placement_gated_recs": 3033,
+    "sl_dist_pct_avg": -3.0,
+    "sl_dist_atr_avg": -2.327
+  },
+  "per_symbol": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 65,
+      "v5_wr": 49.23076923076923,
+      "v5_pf": 1.1754625014692412,
+      "v5_exp": 0.0771012605492723,
+      "v5_dd": 0.577066540442079,
+      "v5_ret": 0.2485123206713615,
+      "base_trades": 87,
+      "base_pf": 1.0244399137697522,
+      "base_ret": 0.1027315350794197,
+      "buy_hold_ret": 9.045828367343244,
+      "class_counts": {
+        "SL_initial": 31,
+        "TimeStop": 19,
+        "TP": 8,
+        "SL_protected": 3,
+        "MaxHolding": 3,
+        "TP2": 1
+      }
+    },
+    {
+      "symbol": "ETHUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 50,
+      "v5_wr": 46.0,
+      "v5_pf": 1.5255563012734272,
+      "v5_exp": 0.3202672420189417,
+      "v5_dd": 0.8295082270106958,
+      "v5_ret": 0.7993703089040719,
+      "base_trades": 91,
+      "base_pf": 1.0744792844434783,
+      "base_ret": 0.4266802918523899,
+      "buy_hold_ret": 26.765892917413385,
+      "class_counts": {
+        "SL_initial": 24,
+        "TimeStop": 8,
+        "TP": 7,
+        "SL_protected": 4,
+        "TP2": 3,
+        "StructFlip": 3,
+        "MaxHolding": 1
+      }
+    },
+    {
+      "symbol": "BNBUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 49,
+      "v5_wr": 46.93877551020408,
+      "v5_pf": 1.058752438042415,
+      "v5_exp": 0.030291959830996917,
+      "v5_dd": 0.8228677939843335,
+      "v5_ret": 0.07216619227770935,
+      "base_trades": 97,
+      "base_pf": 0.9816055331352045,
+      "base_ret": -0.09381272836788412,
+      "buy_hold_ret": 16.076401501392425,
+      "class_counts": {
+        "SL_initial": 25,
+        "TimeStop": 13,
+        "TP": 4,
+        "SL_protected": 4,
+        "MaxHolding": 1,
+        "TP2": 1,
+        "StructFlip": 1
+      }
+    },
+    {
+      "symbol": "SOLUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 52,
+      "v5_wr": 61.53846153846154,
+      "v5_pf": 2.7439766417614417,
+      "v5_exp": 0.8898499396370216,
+      "v5_dd": 0.7401562236674547,
+      "v5_ret": 2.333484823348481,
+      "base_trades": 87,
+      "base_pf": 1.3068038162590307,
+      "base_ret": 1.8418908352829204,
+      "buy_hold_ret": 35.16094800141492,
+      "class_counts": {
+        "SL_initial": 17,
+        "TP": 14,
+        "TimeStop": 12,
+        "SL_protected": 4,
+        "StructFlip": 2,
+        "MaxHolding": 2,
+        "TP2": 1
+      }
+    },
+    {
+      "symbol": "XRPUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 45,
+      "v5_wr": 40.0,
+      "v5_pf": 2.255490496448229,
+      "v5_exp": 0.966910090238794,
+      "v5_dd": 0.5599213773386655,
+      "v5_ret": 2.18502192550799,
+      "base_trades": 84,
+      "base_pf": 1.212081683190702,
+      "base_ret": 1.2992468969053517,
+      "buy_hold_ret": 11.216546815924087,
+      "class_counts": {
+        "SL_initial": 19,
+        "TimeStop": 10,
+        "TP": 10,
+        "MaxHolding": 2,
+        "SL_protected": 2,
+        "StructFlip": 1,
+        "TP2": 1
+      }
+    },
+    {
+      "symbol": "ADAUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 45,
+      "v5_wr": 48.888888888888886,
+      "v5_pf": 2.6117941768717863,
+      "v5_exp": 1.5066583428285734,
+      "v5_dd": 1.3243671257532004,
+      "v5_ret": 3.42539897894183,
+      "base_trades": 87,
+      "base_pf": 1.5211399142230204,
+      "base_ret": 4.025870260107258,
+      "buy_hold_ret": -1.112484548825714,
+      "class_counts": {
+        "SL_initial": 17,
+        "TP": 14,
+        "TimeStop": 7,
+        "StructFlip": 3,
+        "SL_protected": 2,
+        "TP2": 1,
+        "MaxHolding": 1
+      }
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 44,
+      "v5_wr": 43.18181818181818,
+      "v5_pf": 2.072960796202541,
+      "v5_exp": 1.00448308922492,
+      "v5_dd": 1.3573339857171347,
+      "v5_ret": 2.2121589790338656,
+      "base_trades": 77,
+      "base_pf": 1.1190203563848768,
+      "base_ret": 0.8069864031840552,
+      "buy_hold_ret": 11.289453840353335,
+      "class_counts": {
+        "SL_initial": 22,
+        "StructFlip": 6,
+        "TimeStop": 6,
+        "TP": 6,
+        "SL_protected": 4
+      }
+    },
+    {
+      "symbol": "DOTUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 52,
+      "v5_wr": 36.53846153846153,
+      "v5_pf": 1.3074989241197696,
+      "v5_exp": 0.38998627988636553,
+      "v5_dd": 1.710407809935774,
+      "v5_ret": 1.0008033807848005,
+      "base_trades": 82,
+      "base_pf": 0.9045840005728161,
+      "base_ret": -0.8179234240390906,
+      "buy_hold_ret": -12.410501193317417,
+      "class_counts": {
+        "SL_initial": 26,
+        "TP": 13,
+        "TimeStop": 7,
+        "StructFlip": 3,
+        "SL_protected": 3
+      }
+    },
+    {
+      "symbol": "LINKUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 52,
+      "v5_wr": 48.07692307692308,
+      "v5_pf": 1.7243304362268197,
+      "v5_exp": 0.5530657291691318,
+      "v5_dd": 1.1420979286781254,
+      "v5_ret": 1.4403124812811257,
+      "base_trades": 87,
+      "base_pf": 1.0690624635540276,
+      "base_ret": 0.43905819605848595,
+      "buy_hold_ret": 30.178703605794638,
+      "class_counts": {
+        "SL_initial": 28,
+        "TP": 7,
+        "SL_protected": 5,
+        "TimeStop": 5,
+        "TP2": 4,
+        "StructFlip": 2,
+        "MaxHolding": 1
+      }
+    },
+    {
+      "symbol": "UNIUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 50,
+      "v5_wr": 50.0,
+      "v5_pf": 2.9283964069476864,
+      "v5_exp": 1.959451394899357,
+      "v5_dd": 1.1834588796735852,
+      "v5_ret": 4.979956121183913,
+      "base_trades": 105,
+      "base_pf": 1.7942448090089442,
+      "base_ret": 9.127867842794766,
+      "buy_hold_ret": 178.5498489425982,
+      "class_counts": {
+        "SL_initial": 20,
+        "TP": 14,
+        "StructFlip": 7,
+        "TimeStop": 4,
+        "SL_protected": 3,
+        "MaxHolding": 1,
+        "TP2": 1
+      }
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 54,
+      "v5_wr": 42.592592592592595,
+      "v5_pf": 1.356251563794665,
+      "v5_exp": 0.4950798780334982,
+      "v5_dd": 1.2693039336320577,
+      "v5_ret": 1.3255624433171214,
+      "base_trades": 105,
+      "base_pf": 1.0786229530865816,
+      "base_ret": 0.8634601279078015,
+      "buy_hold_ret": 62.5,
+      "class_counts": {
+        "SL_initial": 29,
+        "TP": 8,
+        "SL_protected": 7,
+        "StructFlip": 4,
+        "TP2": 3,
+        "TimeStop": 2,
+        "MaxHolding": 1
+      }
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 31,
+      "v5_wr": 38.70967741935484,
+      "v5_pf": 1.1108292608903227,
+      "v5_exp": 0.10028891986133696,
+      "v5_dd": 0.9595300644126463,
+      "v5_ret": 0.1525388252790981,
+      "base_trades": 71,
+      "base_pf": 1.7054510412198776,
+      "base_ret": 3.4475423182891243,
+      "buy_hold_ret": -18.656015037593985,
+      "class_counts": {
+        "SL_initial": 13,
+        "TimeStop": 10,
+        "TP": 4,
+        "SL_protected": 3,
+        "StructFlip": 1
+      }
+    },
+    {
+      "symbol": "ARBUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 28,
+      "v5_wr": 57.14285714285714,
+      "v5_pf": 3.2943265584584975,
+      "v5_exp": 2.752087172080036,
+      "v5_dd": 1.1213705291708287,
+      "v5_ret": 3.8904991792952934,
+      "base_trades": 78,
+      "base_pf": 1.8047203308003532,
+      "base_ret": 7.827040971995139,
+      "buy_hold_ret": 110.85343228200371,
+      "class_counts": {
+        "SL_initial": 12,
+        "TP": 6,
+        "TP2": 4,
+        "SL_protected": 3,
+        "TimeStop": 2,
+        "StructFlip": 1
+      }
+    },
+    {
+      "symbol": "OPUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 42,
+      "v5_wr": 42.857142857142854,
+      "v5_pf": 1.7559553787651418,
+      "v5_exp": 0.8162247264046769,
+      "v5_dd": 1.4664225487676177,
+      "v5_ret": 1.7156264778920922,
+      "base_trades": 73,
+      "base_pf": 1.00962999358036,
+      "base_ret": 0.07853985982579616,
+      "buy_hold_ret": -2.635658914728693,
+      "class_counts": {
+        "SL_initial": 21,
+        "TimeStop": 7,
+        "TP": 7,
+        "StructFlip": 4,
+        "SL_protected": 2,
+        "TP2": 1
+      }
+    },
+    {
+      "symbol": "APTUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 35,
+      "v5_wr": 31.428571428571427,
+      "v5_pf": 0.7233809289680196,
+      "v5_exp": -0.4286958095356085,
+      "v5_dd": 1.5262860377438907,
+      "v5_ret": -0.7550336996002444,
+      "base_trades": 66,
+      "base_pf": 1.017770822197757,
+      "base_ret": 0.12536375054532983,
+      "buy_hold_ret": -19.67775467775467,
+      "class_counts": {
+        "SL_initial": 20,
+        "TimeStop": 6,
+        "TP": 3,
+        "SL_protected": 2,
+        "StructFlip": 2,
+        "TP2": 2
+      }
+    },
+    {
+      "symbol": "SUIUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 35,
+      "v5_wr": 54.285714285714285,
+      "v5_pf": 2.603484781538937,
+      "v5_exp": 1.4754732747768915,
+      "v5_dd": 0.6026841340589567,
+      "v5_ret": 2.597118413584012,
+      "base_trades": 74,
+      "base_pf": 1.3876974131925999,
+      "base_ret": 2.5307566651726847,
+      "buy_hold_ret": -6.399613899613901,
+      "class_counts": {
+        "SL_initial": 19,
+        "TP": 5,
+        "SL_protected": 4,
+        "TimeStop": 3,
+        "StructFlip": 2,
+        "TP2": 1,
+        "MaxHolding": 1
+      }
+    },
+    {
+      "symbol": "INJUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 54,
+      "v5_wr": 40.74074074074074,
+      "v5_pf": 1.3127865937036476,
+      "v5_exp": 0.48243474698065,
+      "v5_dd": 2.2766790820734966,
+      "v5_ret": 1.28663694793142,
+      "base_trades": 95,
+      "base_pf": 0.834464482055535,
+      "base_ret": -2.08411672336817,
+      "buy_hold_ret": 35.8216875995047,
+      "class_counts": {
+        "SL_initial": 34,
+        "TP": 10,
+        "TimeStop": 4,
+        "SL_protected": 4,
+        "StructFlip": 2
+      }
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "interval": "1h",
+      "bars": 3000,
+      "v5_trades": 41,
+      "v5_wr": 56.09756097560976,
+      "v5_pf": 2.918151547443159,
+      "v5_exp": 1.2804546774101382,
+      "v5_dd": 0.7115894404877363,
+      "v5_ret": 2.648725119870942,
+      "base_trades": 70,
+      "base_pf": 0.9205627713872634,
+      "base_ret": -0.5202867707789302,
+      "buy_hold_ret": -9.051597051597048,
+      "class_counts": {
+        "SL_initial": 19,
+        "TP": 10,
+        "SL_protected": 4,
+        "TimeStop": 3,
+        "TP2": 3,
+        "StructFlip": 2
+      }
+    },
+    {
+      "symbol": "BTCUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 30,
+      "v5_wr": 40.0,
+      "v5_pf": 0.9989193100519155,
+      "v5_exp": -6.338038094670558e-05,
+      "v5_dd": 0.35810645199083363,
+      "v5_ret": -0.0005104063501676137,
+      "base_trades": 49,
+      "base_pf": 0.9396802087597718,
+      "base_ret": -0.07644317718930324,
+      "buy_hold_ret": 3.950339045400117,
+      "class_counts": {
+        "SL_initial": 19,
+        "StructFlip": 4,
+        "TP": 4,
+        "TP2": 2,
+        "SL_protected": 1
+      }
+    },
+    {
+      "symbol": "ETHUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 42,
+      "v5_wr": 42.857142857142854,
+      "v5_pf": 1.2848145250845737,
+      "v5_exp": 0.13196870922606266,
+      "v5_dd": 0.30987075697153676,
+      "v5_ret": 0.27540199145003497,
+      "base_trades": 69,
+      "base_pf": 0.6767097332041089,
+      "base_ret": -0.9087450642243311,
+      "buy_hold_ret": 6.810618590141471,
+      "class_counts": {
+        "SL_initial": 19,
+        "StructFlip": 11,
+        "TP": 7,
+        "TP2": 3,
+        "SL_protected": 2
+      }
+    },
+    {
+      "symbol": "SOLUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 29,
+      "v5_wr": 55.172413793103445,
+      "v5_pf": 2.4079128274417334,
+      "v5_exp": 0.5319072980926399,
+      "v5_dd": 0.30076231960003347,
+      "v5_ret": 0.7721724978026395,
+      "base_trades": 62,
+      "base_pf": 1.283846188768297,
+      "base_ret": 0.5897371993517664,
+      "buy_hold_ret": 10.32493751201693,
+      "class_counts": {
+        "SL_initial": 11,
+        "TP": 8,
+        "StructFlip": 4,
+        "SL_protected": 3,
+        "TP2": 3
+      }
+    },
+    {
+      "symbol": "XRPUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 28,
+      "v5_wr": 35.714285714285715,
+      "v5_pf": 0.5157792209690009,
+      "v5_exp": -0.2856991952129143,
+      "v5_dd": 0.6840919019821151,
+      "v5_ret": -0.3998010808622894,
+      "base_trades": 60,
+      "base_pf": 1.4110373317116351,
+      "base_ret": 1.0151394412956325,
+      "buy_hold_ret": 3.575603383070897,
+      "class_counts": {
+        "SL_initial": 17,
+        "StructFlip": 7,
+        "SL_protected": 3,
+        "TP": 1
+      }
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 51,
+      "v5_wr": 45.09803921568628,
+      "v5_pf": 1.4182227539622276,
+      "v5_exp": 0.19447786260502034,
+      "v5_dd": 0.4471992886110422,
+      "v5_ret": 0.4943593762455566,
+      "base_trades": 76,
+      "base_pf": 0.857968615472112,
+      "base_ret": -0.5353498255082013,
+      "buy_hold_ret": 5.685580545724396,
+      "class_counts": {
+        "SL_initial": 29,
+        "StructFlip": 8,
+        "TP": 7,
+        "TP2": 5,
+        "SL_protected": 2
+      }
+    },
+    {
+      "symbol": "ARBUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 40,
+      "v5_wr": 35.0,
+      "v5_pf": 0.7731430290279042,
+      "v5_exp": -0.3623794840210074,
+      "v5_dd": 1.5702510280423454,
+      "v5_ret": -0.7336819637252484,
+      "base_trades": 74,
+      "base_pf": 0.9915737876193662,
+      "base_ret": -0.07202823447021729,
+      "buy_hold_ret": 63.31658291457286,
+      "class_counts": {
+        "SL_initial": 24,
+        "TP": 8,
+        "StructFlip": 7,
+        "SL_protected": 1
+      }
+    },
+    {
+      "symbol": "INJUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 37,
+      "v5_wr": 37.83783783783784,
+      "v5_pf": 0.6789112201175067,
+      "v5_exp": -0.3738790632569439,
+      "v5_dd": 1.3830367131804073,
+      "v5_ret": -0.6937535507097892,
+      "base_trades": 74,
+      "base_pf": 1.413904574565032,
+      "base_ret": 2.2252433387531525,
+      "buy_hold_ret": 54.25296601648905,
+      "class_counts": {
+        "SL_initial": 28,
+        "TP": 3,
+        "SL_protected": 3,
+        "StructFlip": 3
+      }
+    },
+    {
+      "symbol": "SUIUSDT",
+      "interval": "15m",
+      "bars": 2000,
+      "v5_trades": 30,
+      "v5_wr": 60.0,
+      "v5_pf": 3.044029431349189,
+      "v5_exp": 1.1828398320779745,
+      "v5_dd": 0.5740347756794839,
+      "v5_ret": 1.77938974203651,
+      "base_trades": 54,
+      "base_pf": 1.5718801304933772,
+      "base_ret": 1.789829136595363,
+      "buy_hold_ret": 23.85767310892103,
+      "class_counts": {
+        "SL_initial": 15,
+        "TP": 7,
+        "StructFlip": 4,
+        "SL_protected": 2,
+        "TP2": 2
+      }
+    }
+  ]
+}

@@ -123,6 +123,10 @@ class Settings:
     # ATR chandelier trailing: trail SL `mult` x ATR below the highest seen price
     CHANDELIER_ENABLED: bool = os.getenv("CHANDELIER_ENABLED", "true").lower() == "true"
     CHANDELIER_ATR_MULT: float = float(os.getenv("CHANDELIER_ATR_MULT", "2.5"))
+    # Min unrealized profit (%) before the chandelier trail arms itself.
+    # Default 1.0 keeps v5 behaviour; comprehensive backtest (2026-09-23)
+    # showed SL_initial trades gave back avg +2.11% MFE before dying at -1%.
+    CHANDELIER_ACTIVATE_PCT: float = float(os.getenv("CHANDELIER_ACTIVATE_PCT", "1.0"))
     # Structure exits: Ichimoku regime flip / opposite strong signal
     STRUCTURAL_EXITS_ENABLED: bool = os.getenv(
         "STRUCTURAL_EXITS_ENABLED", "true").lower() == "true"
