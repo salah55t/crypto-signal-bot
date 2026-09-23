@@ -239,6 +239,15 @@ class Database:
         # Auto-init on first use
         self._ensure_init()
 
+    def init(self):
+        """Public explicit initialization (alias of _ensure_init).
+
+        web/app.py startup_event() calls db.init(); previously this raised
+        "'Database' object has no attribute 'init'" at every startup
+        (harmless - the constructor already lazy-inits - but noisy).
+        """
+        self._ensure_init()
+
     def _ensure_init(self):
         """Initialize DB schema on first use."""
         try:
