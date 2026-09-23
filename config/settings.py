@@ -48,7 +48,9 @@ class Settings:
     RUN_MODE: str = os.getenv("RUN_MODE", "paper")  # paper | live
     # v2 confidence scale (strength x confluence): neutral market = 0%,
     # one strong strategy ~= 64%, two agreeing ~= 76%. 60 = quality floor.
-    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "60"))
+    # v4.1: raised 60 -> 68 — live monitoring (2026-09-23: 45% WR on 20 trades)
+    # showed the 60-68 band churns marginal entries; 68+ keeps high-confluence setups only.
+    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "68"))
     MIN_EXPECTED_RISE: float = float(os.getenv("MIN_EXPECTED_RISE", "1.0"))
     # Top 5 recommendations only (was 15) - sent to Telegram + opened as positions
     MAX_RECOMMENDATIONS: int = int(os.getenv("MAX_RECOMMENDATIONS", "5"))
@@ -61,7 +63,20 @@ class Settings:
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "5"))
     DAILY_MAX_LOSS: float = float(os.getenv("DAILY_MAX_LOSS", "5.0"))
     # Minimum risk/reward for any recommendation (SL/TP are built to satisfy this)
+    # v4.1: grid-tested conf{60,65,68} x RR{1.5,1.6,1.8} on BTC+ETH 1000x1h:
+    # RR 1.5 wins on average (ETH degrades at higher RR), conf 68 wins overall
+    # (avg PF 3.70, avg expectancy +1.35%/trade vs v4's 2.02 / +0.90%).
     MIN_RR_RATIO: float = float(os.getenv("MIN_RR_RATIO", "1.5"))
+
+    # --- v4.1 Loss-avoidance guards (based on live paper monitoring) ---
+    # Daily cap on NEW positions opened (was unbounded: 20+/day churned fees).
+    MAX_TRADES_PER_DAY: int = int(os.getenv("MAX_TRADES_PER_DAY", "12"))
+    # After N consecutive losing closes, pause new entries for a few hours (anti-tilt).
+    LOSS_STREAK_LIMIT: int = int(os.getenv("LOSS_STREAK_LIMIT", "3"))
+    LOSS_STREAK_PAUSE_HOURS: float = float(os.getenv("LOSS_STREAK_PAUSE_HOURS", "4"))
+    # After a symbol hits Stop Loss, block re-opening it for N hours
+    # (prevents re-entering the same chop that caused the loss).
+    REENTRY_COOLDOWN_HOURS: float = float(os.getenv("REENTRY_COOLDOWN_HOURS", "2"))
 
     # --- v4 Integrated Confluence (Ichimoku + Elliott) ---
     # When True, a signal whose direction opposes the Ichimoku cloud regime

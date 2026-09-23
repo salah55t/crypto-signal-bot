@@ -22,6 +22,7 @@ from src.core.binance_client import binance_client
 from src.core.scheduler import scheduler
 from src.analysis.analyzer import analyzer
 from src.risk.manager import risk_manager
+from src.db.database import db
 from src.notifications import telegram_notifier, file_logger
 from src.utils.logger import log
 from src.utils.helpers import load_json, save_json, to_json_safe, now_utc
@@ -166,12 +167,29 @@ def run_analysis_cycle():
 
     # ---- STEP 5: Open new positions (paper or live based on RUN_MODE) ----
     log.info(f"[cyan]Mode:[/] {settings.RUN_MODE}")
+    # v4.1: sync today's opened count from DB (survives restarts on Render)
+    try:
+        today_rows = db.get_daily_stats(1)
+        if today_rows and today_rows[0].get("date") == risk_manager._today_key():
+            risk_manager.sync_daily_opened(int(today_rows[0].get("trades_opened") or 0))
+    except Exception as e:
+        log.debug(f"Daily opened sync skipped: {e}")
     open_symbols = {p["symbol"] for p in risk_manager.open_positions}
     opened = 0
     for rec in recommendations:
+        # v4.1: global gates (max positions / daily loss / trade cap / loss-streak)
         if not risk_manager.can_open_position():
-            log.warning("Max open positions or daily loss limit reached")
+            log.warning(
+                "Risk gate (global): max positions / daily loss / trade cap / "
+                "loss-streak pause"
+            )
             break
+        # v4.1: per-symbol re-entry cooldown after a losing close -> skip symbol only
+        if risk_manager.is_symbol_blocked(rec.get("symbol")):
+            log.warning(
+                f"[yellow]Skip {rec['symbol']}[/] - re-entry cooldown after recent loss"
+            )
+            continue
         # Skip duplicates: never open two positions on the same symbol
         if settings.SKIP_DUPLICATE_SYMBOLS and rec["symbol"] in open_symbols:
             log.info(f"[yellow]Skip {rec['symbol']}[/] - position already open")

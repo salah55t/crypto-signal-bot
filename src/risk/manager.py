@@ -7,7 +7,7 @@ Risk Management Module
 """
 from pathlib import Path
 from typing import Dict, Optional, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config.settings import settings
 from src.db.database import db
 from src.utils.logger import log
@@ -24,11 +24,83 @@ class RiskManager:
         self.capital = capital or settings.INITIAL_CAPITAL
         self.open_positions: List[Dict] = load_json(POSITIONS_FILE, default=[])
         self.daily_stats: Dict = load_json(DAILY_STATS_FILE, default={})
+        # v4.1 loss-avoidance state
+        self._reentry_block: Dict[str, datetime] = {}  # symbol -> blocked until
+        self._restore_loss_state()
         log.info(
             f"[cyan]RiskManager[/] initialized - "
             f"Capital: ${self.capital:,.2f} | "
             f"Open positions: {len(self.open_positions)}"
         )
+
+    def _restore_loss_state(self):
+        """v4.1: restore loss-streak / pause state persisted in today's stats."""
+        try:
+            today = self.daily_stats.get(self._today_key(), {})
+            self._loss_streak = int(today.get("loss_streak", 0))
+            pause_until = today.get("loss_pause_until")
+            self._loss_pause_until = (
+                datetime.fromisoformat(pause_until) if pause_until else None
+            )
+        except Exception:
+            self._loss_streak = 0
+            self._loss_pause_until = None
+
+    @property
+    def loss_streak(self) -> int:
+        return getattr(self, "_loss_streak", 0)
+
+    @loss_streak.setter
+    def loss_streak(self, value: int):
+        self._loss_streak = value
+
+    def _set_loss_pause(self):
+        """v4.1: activate anti-tilt pause after N consecutive losses."""
+        self._loss_pause_until = now_utc() + timedelta(
+            hours=settings.LOSS_STREAK_PAUSE_HOURS
+        )
+        self._persist_loss_state()
+        log.warning(
+            f"[red]Loss-streak circuit breaker:[/] {self._loss_streak} consecutive "
+            f"losses - pausing new entries until {self._loss_pause_until.isoformat()}"
+        )
+
+    def _persist_loss_state(self):
+        """Persist streak/pause inside today's daily stats (best effort)."""
+        try:
+            self._ensure_today_stats()
+            stats = self.daily_stats[self._today_key()]
+            stats["loss_streak"] = self._loss_streak
+            stats["loss_pause_until"] = (
+                self._loss_pause_until.isoformat() if self._loss_pause_until else None
+            )
+            save_json(self.daily_stats, DAILY_STATS_FILE)
+        except Exception as e:
+            log.debug(f"Persist loss state failed: {e}")
+
+    def _loss_pause_active(self) -> bool:
+        return (
+            self._loss_pause_until is not None
+            and now_utc() < self._loss_pause_until
+        )
+
+    def _in_reentry_cooldown(self, symbol: str) -> bool:
+        """v4.1: symbol recently hit Stop Loss -> block re-entry for a while."""
+        until = self._reentry_block.get(symbol)
+        if until is None:
+            return False
+        if now_utc() >= until:
+            del self._reentry_block[symbol]
+            return False
+        return True
+
+    def sync_daily_opened(self, db_count: int):
+        """v4.1: sync today's opened count from DB (survives process restarts)."""
+        self._ensure_today_stats()
+        stats = self.daily_stats[self._today_key()]
+        if db_count > stats.get("trades_opened", 0):
+            stats["trades_opened"] = int(db_count)
+            save_json(self.daily_stats, DAILY_STATS_FILE)
 
     def _today_key(self) -> str:
         return now_utc().strftime("%Y-%m-%d")
@@ -52,13 +124,40 @@ class RiskManager:
             return 0.0
         return stats["pnl"] / stats["starting_capital"] * 100
 
-    def can_open_position(self) -> bool:
-        """Check if we can open a new position (risk rules)."""
+    def is_symbol_blocked(self, symbol: str) -> bool:
+        """v4.1: public check for per-symbol re-entry cooldown (after a loss)."""
+        return bool(symbol) and self._in_reentry_cooldown(symbol)
+
+    def can_open_position(self, symbol: str = None) -> bool:
+        """Check if we can open a new position (risk rules).
+        v4.1 adds: daily trade cap, loss-streak pause, per-symbol re-entry cooldown.
+        """
         if len(self.open_positions) >= settings.MAX_OPEN_POSITIONS:
             log.warning(f"Max open positions reached ({settings.MAX_OPEN_POSITIONS})")
             return False
         if self.daily_pnl_pct() <= -settings.DAILY_MAX_LOSS:
             log.warning(f"Daily max loss hit ({self.daily_pnl_pct():.2f}%)")
+            return False
+        # v4.1: daily trade count cap (fees from churn exceeded profits live)
+        self._ensure_today_stats()
+        opened_today = self.daily_stats[self._today_key()].get("trades_opened", 0)
+        if opened_today >= settings.MAX_TRADES_PER_DAY:
+            log.warning(
+                f"Daily trade cap reached ({opened_today}/{settings.MAX_TRADES_PER_DAY})"
+            )
+            return False
+        # v4.1: anti-tilt circuit breaker
+        if self._loss_pause_active():
+            log.warning(
+                f"Loss-streak pause active until {self._loss_pause_until.isoformat()}"
+            )
+            return False
+        # v4.1: per-symbol re-entry cooldown after a Stop Loss
+        if symbol and self._in_reentry_cooldown(symbol):
+            log.warning(
+                f"Re-entry cooldown active for {symbol} "
+                f"(last SL < {settings.REENTRY_COOLDOWN_HOURS}h ago)"
+            )
             return False
         return True
 
@@ -108,7 +207,7 @@ class RiskManager:
         if not valid:
             return {"status": "rejected", "reasons": reasons}
 
-        if not self.can_open_position():
+        if not self.can_open_position(rec.get("symbol")):
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
 
         # Duplicate-symbol guard (second line of defense)
@@ -340,8 +439,23 @@ class RiskManager:
         self.daily_stats[self._today_key()]["pnl"] += net_pnl
         if net_pnl > 0:
             self.daily_stats[self._today_key()]["wins"] += 1
+            # v4.1: winning close resets the loss streak
+            self._loss_streak = 0
         else:
             self.daily_stats[self._today_key()]["losses"] += 1
+            # v4.1: track consecutive losses -> circuit breaker + re-entry cooldown
+            self._loss_streak = self.loss_streak + 1
+            self._reentry_block[pos["symbol"]] = now_utc() + timedelta(
+                hours=settings.REENTRY_COOLDOWN_HOURS
+            )
+            log.info(
+                f"[yellow]Re-entry cooldown[/] {pos['symbol']} for "
+                f"{settings.REENTRY_COOLDOWN_HOURS}h after a losing close"
+            )
+            if self._loss_streak >= settings.LOSS_STREAK_LIMIT:
+                self._set_loss_pause()
+            else:
+                self._persist_loss_state()
         save_json(self.daily_stats, DAILY_STATS_FILE)
         # Log to database
         try:
