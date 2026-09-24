@@ -29,6 +29,7 @@ from src.db.database import db
 from src.notifications import telegram_notifier, file_logger
 from src.utils.logger import log
 from src.utils.helpers import load_json, save_json, to_json_safe, now_utc
+from src.utils.i18n import tr, ar_mode, ar_entry_type
 
 DATA_DIR = Path("data")
 CLOSED_TRADES_FILE = DATA_DIR / "closed_trades.json"
@@ -78,32 +79,33 @@ def _notify_closed(closed: list):
             continue
         if c.get("status") == "partial":
             telegram_notifier.send_alert(
-                f"TP1 Partial 🎯 {c.get('symbol', '')}",
-                f"Banked {c.get('fraction', 0)*100:.0f}% at {c.get('exit_price')}\n"
-                f"PnL: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
-                f"Runner now targets TP2 with SL at break-even"
+                f"جني جزئي TP1 🎯 {c.get('symbol', '')}",
+                f"تم تحقيق {c.get('fraction', 0)*100:.0f}% من الصفقة عند {c.get('exit_price')}\n"
+                f"الربح/الخسارة: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
+                f"الكمية المتبقية تستهدف TP2 ووقفها عند نقطة التعادل"
             )
             continue
         win_emoji = "✅" if c.get("pnl", 0) > 0 else "❌"
         telegram_notifier.send_alert(
-            f"Position Closed {win_emoji}",
-            f"Symbol: {c.get('symbol')}\n"
-            f"Entry: {c.get('entry_price')}\n"
-            f"Exit: {c.get('exit_price')}\n"
-            f"PnL: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
-            f"Reason: {c.get('reason', '')}\n"
-            f"Mode: {'PAPER' if c.get('paper', True) else 'LIVE'}"
+            f"إغلاق صفقة {win_emoji}",
+            f"العملة: {c.get('symbol')}\n"
+            f"الدخول: {c.get('entry_price')}\n"
+            f"الخروج: {c.get('exit_price')}\n"
+            f"الربح/الخسارة: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
+            f"السبب: {tr(c.get('reason', ''))}\n"
+            f"الوضع: {ar_mode('PAPER' if c.get('paper', True) else 'LIVE')}"
         )
 
 
 def _notify_updates(updates: list, tag: str = ""):
+    tag_ar = " (مراقبة)" if tag.strip() == "(watch)" else (f" {tag}" if tag else "")
     for u in updates:
         if telegram_notifier.enabled:
             telegram_notifier.send_alert(
-                f"Risk Update 🔧 {u.get('symbol', '')} {tag}".strip(),
-                f"{u.get('reason', '')}\n"
-                f"Old SL: {u.get('old_sl')} → New SL: {u.get('new_sl')}\n"
-                f"Old TP: {u.get('old_tp')} → New TP: {u.get('new_tp')}"
+                f"تحديث مخاطر 🔧 {u.get('symbol', '')}{tag_ar}",
+                f"{tr(u.get('reason', ''))}\n"
+                f"وقف قديم: {u.get('old_sl')} → وقف جديد: {u.get('new_sl')}\n"
+                f"هدف قديم: {u.get('old_tp')} → هدف جديد: {u.get('new_tp')}"
             )
 
 
@@ -222,10 +224,10 @@ def run_position_watch():
                 if telegram_notifier.enabled:
                     pos = f.get("position", {})
                     telegram_notifier.send_alert(
-                        f"Limit Entry Filled 🎯 {f.get('symbol', '')}",
-                        f"Filled at: {f.get('fill_price')}\n"
-                        f"Entry zone respected (no chasing)\n"
-                        f"SL: {pos.get('stop_loss')} | TP: {pos.get('take_profit')}"
+                        f"تنفيذ أمر دخول معلق 🎯 {f.get('symbol', '')}",
+                        f"نُفذ عند: {f.get('fill_price')}\n"
+                        f"تم احترام منطقة الدخول (بدون مطاردة السعر)\n"
+                        f"وقف: {pos.get('stop_loss')} | هدف: {pos.get('take_profit')}"
                     )
 
         # 2) price-only position management (no structural analysis here)
@@ -314,13 +316,13 @@ def open_new_positions(recommendations: List[Dict]) -> int:
                 pending_symbols.add(symbol)
                 if telegram_notifier.enabled:
                     telegram_notifier.send_alert(
-                        f"Pending Limit Entry ⏳ {symbol}",
-                        f"Entry zone: {pending['zone_low']:.4f} - "
+                        f"أمر دخول معلق ⏳ {symbol}",
+                        f"منطقة الدخول: {pending['zone_low']:.4f} - "
                         f"{pending['zone_high']:.4f}\n"
-                        f"Current: {price:.4f} (waiting for pullback)\n"
-                        f"SL: {rec.get('stop_loss')} | TP1: {rec.get('take_profit')} "
+                        f"الحالي: {price:.4f} (بانتظار ارتداد السعر للمنطقة)\n"
+                        f"وقف: {rec.get('stop_loss')} | TP1: {rec.get('take_profit')} "
                         f"| TP2: {rec.get('take_profit_2')}\n"
-                        f"Expires in {settings.PENDING_TTL_HOURS:.0f}h"
+                        f"ينتهي خلال {settings.PENDING_TTL_HOURS:.0f} ساعة"
                     )
                 continue
 
@@ -333,15 +335,15 @@ def open_new_positions(recommendations: List[Dict]) -> int:
             if telegram_notifier.enabled:
                 pos = result.get("position", {})
                 telegram_notifier.send_alert(
-                    f"Position Opened 🚀 {symbol}",
-                    f"Mode: {mode_tag}\n"
-                    f"Entry: {pos.get('entry_price')} "
-                    f"({pos.get('entry_type', 'market')})\n"
-                    f"SL: {pos.get('stop_loss')}\n"
-                    f"TP1: {pos.get('take_profit')} (banks 50%)\n"
-                    f"TP2: {pos.get('take_profit_2')} (runner)\n"
-                    f"Confidence: {rec.get('confidence', 0):.0f}% | "
-                    f"Harmony: {rec.get('harmony', 0):.2f}"
+                    f"فتح صفقة 🚀 {symbol}",
+                    f"الوضع: {ar_mode(mode_tag)}\n"
+                    f"الدخول: {pos.get('entry_price')} "
+                    f"({ar_entry_type(pos.get('entry_type', 'market'))})\n"
+                    f"وقف الخسارة: {pos.get('stop_loss')}\n"
+                    f"TP1: {pos.get('take_profit')} (يحقق 50% من الصفقة)\n"
+                    f"TP2: {pos.get('take_profit_2')} (الكمية المتبقية)\n"
+                    f"الثقة: {rec.get('confidence', 0):.0f}% | "
+                    f"الانسجام: {rec.get('harmony', 0):.2f}"
                 )
         else:
             log.warning(

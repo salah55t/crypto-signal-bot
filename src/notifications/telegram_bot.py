@@ -5,6 +5,11 @@ Sends formatted recommendations to a Telegram chat.
 v2: per-symbol re-notification cooldown — the same symbol is not re-sent
 within TELEGRAM_COOLDOWN_HOURS (default 4h) unless it comes with an open
 position alert. Cooldown state persists in data/telegram_state.json.
+
+v5.8: all message FRAMES are in Arabic (user request); every dynamic
+fragment (strategy reasons, labels, close/update reasons, ichimoku/
+elliott values) passes through src.utils.i18n.tr() so the core engine
+stays English while Telegram reads fully Arabic.
 """
 import requests
 from pathlib import Path
@@ -12,6 +17,7 @@ from typing import List, Dict
 from config.settings import settings
 from src.utils.logger import log
 from src.utils.helpers import fmt_price, fmt_pct, load_json, save_json, now_utc
+from src.utils.i18n import tr, ar_direction, ar_mode, ar_entry_type, ar_ichimoku
 
 TG_STATE_FILE = Path("data/telegram_state.json")
 
@@ -98,16 +104,16 @@ class TelegramNotifier:
             return 0
 
         sent = 0
-        # Header — emphasize these are TRACKED positions
+        # Header — emphasize these are TRACKED positions (v5.8: Arabic)
         header = (
-            f"*🎯 TOP {len(fresh)} SIGNALS — AUTO-TRACKED POSITIONS*\n"
+            f"*🎯 أفضل {len(fresh)} توصية — صفقات تُفتح وتُتابع تلقائياً*\n"
             f"━━━━━━━━━━━━━━━\n"
             f"⏰ _{fresh[0].get('analyzed_at', 'N/A')[:19]}_\n"
-            f"💼 Mode: `{settings.RUN_MODE.upper()}`\n"
-            f"💵 Trade size: `${settings.TRADE_AMOUNT_USD}` per position\n"
-            f"📊 Bot will OPEN + TRACK all {len(fresh)} positions\n"
-            f"🔄 Dynamic SL/TP updates via continuous analysis\n"
-            f"🛑 Auto-close on SL/TP hit (checked every cycle)\n"
+            f"💼 الوضع: `{ar_mode(settings.RUN_MODE)}`\n"
+            f"💵 حجم الصفقة: `${settings.TRADE_AMOUNT_USD}` لكل صفقة\n"
+            f"📊 البوت سيفتح ويتابع جميع الصفقات الـ{len(fresh)}\n"
+            f"🔄 تحديثات ديناميكية للوقف/الهدف عبر التحليل المستمر\n"
+            f"🛑 إغلاق تلقائي عند لمس الوقف/الهدف (فحص كل دورة)\n"
             f"━━━━━━━━━━━━━━━\n"
         )
         self.send(header)
@@ -117,12 +123,12 @@ class TelegramNotifier:
             if self.send(msg):
                 sent += 1
                 self._mark_sent(rec.get("symbol", ""))
-        # Footer
+        # Footer (v5.8: Arabic)
         footer = (
-            f"\n📈 *Total: {len(fresh)} positions opened & tracked*\n"
-            f"⏭️ Next update in the next analysis cycle\n"
-            f"🔔 You'll receive alerts on SL/TP hits + risk updates\n\n"
-            f"⚠️ _Educational use only. Trade responsibly._"
+            f"\n📈 *الإجمالي: {len(fresh)} صفقة مفتوحة وقيد المتابعة*\n"
+            f"⏭️ التحديث القادم مع الدورة التحليلية القادمة\n"
+            f"🔔 ستصلك تنبيهات لمس الوقف/الهدف وتحديثات المخاطر\n\n"
+            f"⚠️ _للاستخدام التعليمي فقط. تداول بمسؤولية._"
         )
         self.send(footer)
         log.info(f"[green]Sent {sent} top recommendations to Telegram[/]")
@@ -130,8 +136,10 @@ class TelegramNotifier:
 
     def _format_recommendation(self, rec: Dict, position_num: int = 0,
                                  total: int = 0) -> str:
-        direction = rec.get("direction", "neutral").upper()
+        direction_raw = rec.get("direction", "neutral")
+        direction = str(direction_raw).upper()
         emoji = "🟢" if direction == "BULLISH" else "🔴" if direction == "BEARISH" else "⚪"
+        direction_ar = ar_direction(direction_raw)
         symbol = rec.get("symbol", "")
         price = rec.get("current_price", 0)
         conf = rec.get("confidence", 0)
@@ -154,19 +162,19 @@ class TelegramNotifier:
         tp2_label = rec.get("tp2_label", "")
 
         if entry_type == "limit":
-            entry_line = (f"📍 *Entry (LIMIT):* `{fmt_price(entry)}`\n"
-                          f"↕️ *Entry Zone:* `{fmt_price(zone_low)}` → `{fmt_price(zone_high)}`")
+            entry_line = (f"📍 *الدخول (أمر محدد):* `{fmt_price(entry)}`\n"
+                          f"↕️ *منطقة الدخول:* `{fmt_price(zone_low)}` → `{fmt_price(zone_high)}`")
         else:
-            entry_line = f"📍 *Entry (Market):* `{fmt_price(entry)}`"
+            entry_line = f"📍 *الدخول (سوق):* `{fmt_price(entry)}`"
         if entry_label:
-            entry_line += f"\n🧭 _{entry_label}_"
+            entry_line += f"\n🧭 _{tr(entry_label)}_"
 
-        tp1_line = f"✅ *TP1:* `{fmt_price(tp)}` ({fmt_pct((tp-price)/price*100)})"
+        tp1_line = f"✅ *الهدف الأول TP1:* `{fmt_price(tp)}` ({fmt_pct((tp-price)/price*100)})"
         if tp1_label:
-            tp1_line += f" — _{tp1_label}_"
-        tp2_line = f"🎯 *TP2:* `{fmt_price(tp2)}` ({fmt_pct((tp2-price)/price*100)})"
+            tp1_line += f" — _{tr(tp1_label)}_"
+        tp2_line = f"🎯 *الهدف الثاني TP2:* `{fmt_price(tp2)}` ({fmt_pct((tp2-price)/price*100)})"
         if tp2_label:
-            tp2_line += f" — _{tp2_label}_"
+            tp2_line += f" — _{tr(tp2_label)}_"
 
         # v4: integrated confluence layers (fallback-safe for old recs)
         icho = rec.get("ichimoku") or {}
@@ -174,58 +182,58 @@ class TelegramNotifier:
         decision = rec.get("decision") or {}
         confluence_lines = ""
         if icho:
-            cloud_map = {"above": "Above cloud ☁️", "below": "Below cloud ☁️",
-                          "inside": "Inside cloud ☁️"}
+            cloud_map = {"above": "فوق السحابة ☁️", "below": "تحت السحابة ☁️",
+                          "inside": "داخل السحابة ☁️"}
             confluence_lines += (
-                f"\n🌥 *Ichimoku:* `{icho.get('regime', 'N/A').upper()}` — "
+                f"\n🌥 *إيشيموكي:* `{ar_ichimoku('regime', icho.get('regime'))}` — "
                 f"{cloud_map.get(icho.get('price_vs_cloud', ''), '')}"
-                f" | TK: {icho.get('tk_state', 'N/A')}"
-                f" | Kumo: {icho.get('cloud_color', 'N/A')}"
+                f" | TK: {ar_ichimoku('tk_state', icho.get('tk_state'))}"
+                f" | الكومو: {ar_ichimoku('cloud_color', icho.get('cloud_color'))}"
             )
         if ell and ell.get("pattern", "unclear") != "unclear":
             wave_txt = ell.get("current_wave") or "-"
             conf_pct = ell.get("wave_confidence", 0) * 100
             confluence_lines += (
-                f"\n〰️ *Elliott:* `Wave {wave_txt}` — {ell.get('implication', '')}"
-                f" (fit: {conf_pct:.0f}%)"
+                f"\n〰️ *إليوت:* `الموجة {wave_txt}` — {tr(ell.get('implication', ''))}"
+                f" (تطابق: {conf_pct:.0f}%)"
             )
             if ell.get("projection"):
                 confluence_lines += (
-                    f"\n🎚 *Wave Target:* `{fmt_price(ell['projection'])}`"
+                    f"\n🎚 *هدف الموجة:* `{fmt_price(ell['projection'])}`"
                 )
         if decision:
-            badge = "🅰️ *A+ SETUP*" if decision.get("a_plus") else "🧩"
+            badge = "🅰️ *إعداد A+ ممتاز*" if decision.get("a_plus") else "🧩"
             confluence_lines += (
-                f"\n{badge} *Confluence:* base {decision.get('base_confidence', 0):.0f}%"
-                f" → final *{conf:.1f}%*"
+                f"\n{badge} *الانسجام:* الأساس {decision.get('base_confidence', 0):.0f}%"
+                f" → النهائي *{conf:.1f}%*"
             )
             for adj in decision.get("adjustments", [])[:4]:
-                confluence_lines += f"\n   ▪ _{adj}_"
+                confluence_lines += f"\n   ▪ _{tr(adj)}_"
 
-        # Top reasons (combine strategy reasons)
+        # Top reasons (combine strategy reasons) — translated to Arabic
         reasons = []
         for sig in rec.get("signals", []):
             for r in sig.get("reasons", [])[:2]:  # top 2 per strategy
-                reasons.append(r)
-        reasons_text = "\n".join(f"• {r}" for r in reasons[:8]) or "No specific signals"
+                reasons.append(tr(r))
+        reasons_text = "\n".join(f"• {r}" for r in reasons[:8]) or "لا توجد إشارات محددة"
 
+        pos_tag = f" (صفقة {position_num}/{total})" if position_num else ""
         return (
-            f"{emoji} *{symbol}* — `{direction}`"
-            + (f" (Position {position_num}/{total})" if position_num else "")
+            f"{emoji} *{symbol}* — `{direction_ar}`{pos_tag}"
             + f"\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"💰 *Price:* `{fmt_price(price)}`\n"
+            f"💰 *السعر:* `{fmt_price(price)}`\n"
             f"{entry_line}\n"
-            f"📈 *Expected Rise:* `{fmt_pct(expected)}`\n"
-            f"🎯 *Confidence:* `{conf:.1f}%` (score: {score:+.1f})\n"
-            f"🛑 *Stop Loss:* `{fmt_price(sl)}` ({fmt_pct((sl-price)/price*100)})\n"
+            f"📈 *الارتفاع المتوقع:* `{fmt_pct(expected)}`\n"
+            f"🎯 *الثقة:* `{conf:.1f}%` (النقاط: {score:+.1f})\n"
+            f"🛑 *وقف الخسارة:* `{fmt_price(sl)}` ({fmt_pct((sl-price)/price*100)})\n"
             f"{tp1_line}\n"
             f"{tp2_line}\n"
-            f"⚖️ *R/R Ratio:* `{rr:.2f}:1` (TP1)\n"
+            f"⚖️ *العائد/المخاطرة:* `{rr:.2f}:1` (TP1)\n"
             f"📊 *ATR:* `{atr_pct:.2f}%`\n"
             f"{confluence_lines}"
             f"\n━━━━━━━━━━━━━━━\n"
-            f"*Signals:*\n{reasons_text}"
+            f"*الإشارات:*\n{reasons_text}"
         )
 
     def send_alert(self, title: str, message: str) -> bool:
