@@ -19,6 +19,7 @@ Auto-detects database type from connection string:
 """
 import os
 import json
+import time
 import sqlite3
 from pathlib import Path
 from typing import Optional, Dict, List, Any
@@ -236,7 +237,10 @@ class Database:
         self.db_path = Path(db_path) if db_path else DB_PATH
         self.use_postgres = self.db_url.startswith("postgresql://") or self.db_url.startswith("postgres://")
         self._conn: Optional[Any] = None
-        # Auto-init on first use
+        self._initialized = False
+        self._next_retry = 0.0
+        # Init schema now; on PostgreSQL failure we do NOT silently fall back
+        # to ephemeral SQLite (that wiped positions/stats on every redeploy).
         self._ensure_init()
 
     def init(self):
@@ -249,42 +253,75 @@ class Database:
         self._ensure_init()
 
     def _ensure_init(self):
-        """Initialize DB schema on first use."""
-        try:
-            schema = SCHEMA_POSTGRES if self.use_postgres else SCHEMA_SQLITE
-            with self._connect() as conn:
-                if self.use_postgres:
-                    # PostgreSQL supports executing multiple statements
-                    cur = conn.cursor()
-                    cur.execute(schema)
-                    conn.commit()
-                else:
-                    # SQLite uses executescript
-                    conn.executescript(schema)
-                    conn.commit()
-            db_type = "PostgreSQL" if self.use_postgres else "SQLite"
-            location = self.db_url if self.use_postgres else str(self.db_path)
-            log.info(f"[green]Database initialized[/] ({db_type}): {location[:50]}{'...' if len(location) > 50 else ''}")
-        except Exception as e:
-            log.error(f"Database init failed: {e}")
-            # Fall back to SQLite if PostgreSQL fails
-            if self.use_postgres:
-                log.warning("[yellow]Falling back to SQLite[/]")
-                self.use_postgres = False
-                self.db_url = ""
+        """Initialize DB schema (PostgreSQL with retries / SQLite direct).
+
+        v5.1 hardening: when DATABASE_URL is configured but Postgres is
+        unreachable (cold Render DB, restart, rotated password), retry a few
+        times and keep retrying lazily on later use. The old behaviour fell
+        back to a fresh ephemeral SQLite file, silently splitting data and
+        losing open positions on the next deploy.
+        """
+        if self._initialized:
+            return
+        if self.use_postgres:
+            last_err = None
+            for attempt in range(3):
                 try:
-                    with self._connect() as conn:
-                        conn.executescript(SCHEMA_SQLITE)
+                    with self._connect_raw() as conn:
+                        cur = conn.cursor()
+                        cur.execute(SCHEMA_POSTGRES)
                         conn.commit()
-                    log.info(f"[green]SQLite fallback initialized[/] at {self.db_path}")
-                except Exception as e2:
-                    log.error(f"SQLite fallback also failed: {e2}")
+                    self._initialized = True
+                    log.info("[green]Database initialized[/] (PostgreSQL) "
+                             f"after {attempt + 1} attempt(s)")
+                    return
+                except Exception as e:
+                    last_err = e
+                    wait = 2 ** attempt * 2  # 2s, 4s, 8s (lets cold DBs wake)
+                    log.warning(f"PostgreSQL init attempt {attempt + 1}/3 "
+                                f"failed: {e} - retrying in {wait}s")
+                    time.sleep(wait)
+            self._next_retry = time.monotonic() + 60.0
+            log.error("PostgreSQL init failed after retries: "
+                      f"{last_err}. STAYING on PostgreSQL - will retry on "
+                      "next use (no silent SQLite fallback; data written to "
+                      "ephemeral SQLite is lost on redeploy). Check that "
+                      "DATABASE_URL matches the current DB credentials.")
+            return
+        try:
+            with self._connect_raw() as conn:
+                conn.executescript(SCHEMA_SQLITE)
+                conn.commit()
+            self._initialized = True
+            log.info(f"[green]Database initialized[/] (SQLite): {self.db_path}")
+        except Exception as e:
+            log.error(f"SQLite init failed: {e}")
 
     def _connect(self):
-        """Get a database connection."""
+        """Get a database connection (re-attempts Postgres init lazily)."""
+        if self.use_postgres:
+            if not self._initialized and time.monotonic() >= self._next_retry:
+                self._ensure_init()
+            if not self._initialized:
+                raise RuntimeError(
+                    "PostgreSQL not initialized (init retry scheduled); "
+                    "refusing to write anywhere else to avoid silent data loss")
+            import psycopg2
+            conn = psycopg2.connect(self.db_url, connect_timeout=10)
+            conn.autocommit = False
+            return conn
+        else:
+            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+
+    def _connect_raw(self):
+        """Raw connection used BY the initializer (no init recursion)."""
         if self.use_postgres:
             import psycopg2
-            conn = psycopg2.connect(self.db_url)
+            conn = psycopg2.connect(self.db_url, connect_timeout=10)
             conn.autocommit = False
             return conn
         else:
