@@ -156,6 +156,37 @@ class Settings:
     TIME_STOP_MIN_PNL_PCT: float = float(os.getenv("TIME_STOP_MIN_PNL_PCT", "0.5"))
     ABSOLUTE_MAX_TRADE_HOURS: float = float(os.getenv("ABSOLUTE_MAX_TRADE_HOURS", "120"))
 
+    # --- v5.7 Signal Stack: user-specified strategy trio ---
+    # The "Signal Stack Framework" golden rule: every strategy must combine
+    # ONE indicator from each class - Direction / Momentum / Volume-Volatility
+    # - never stack same-class indicators (RSI+Stoch+MACD together = one
+    # redundant vote). Each new strategy follows that rule:
+    #   1. TripleConfluenceTrend: EMA200+EMA50 (dir) + RSI (mom) + Vol/OBV (liq)
+    #   2. BBMeanReversion:       BB bands (vol) + Stochastic 14,3,3 (mom) + candle/vol
+    #   3. MACDBreakout:          EMA50 (dir) + MACD 12,26,9 (mom) + Vol (liq)
+    STRATEGY_TRIPLE_TREND_ENABLED: bool = os.getenv(
+        "STRATEGY_TRIPLE_TREND_ENABLED", "true").lower() == "true"
+    STRATEGY_TRIPLE_TREND_WEIGHT: float = float(
+        os.getenv("STRATEGY_TRIPLE_TREND_WEIGHT", "1.6"))
+    STRATEGY_BB_MEAN_REV_ENABLED: bool = os.getenv(
+        "STRATEGY_BB_MEAN_REV_ENABLED", "true").lower() == "true"
+    STRATEGY_BB_MEAN_REV_WEIGHT: float = float(
+        os.getenv("STRATEGY_BB_MEAN_REV_WEIGHT", "1.2"))
+    STRATEGY_MACD_BREAKOUT_ENABLED: bool = os.getenv(
+        "STRATEGY_MACD_BREAKOUT_ENABLED", "true").lower() == "true"
+    STRATEGY_MACD_BREAKOUT_WEIGHT: float = float(
+        os.getenv("STRATEGY_MACD_BREAKOUT_WEIGHT", "1.4"))
+    # Confluence scale reference. The strength x confluence confidence model
+    # was CALIBRATED on the original 3-strategy stack (total weight 5.8):
+    # "one strong strategy ~= 64%, two agreeing ~= 76%". Adding strategies
+    # must not dilute that scale (a lone signal would sink from 64% towards
+    # 58% and MIN_CONFIDENCE=68 would silently demand 3-of-6 agreement).
+    # confluence = agree_w / max(total_weight, REF) capped at 1.0 - the
+    # original stack behaves bit-identically; extra strategies can only ADD
+    # confluence when they actually agree, never punish a lone signal.
+    STRATEGY_CONFLUENCE_REF_WEIGHT: float = float(
+        os.getenv("STRATEGY_CONFLUENCE_REF_WEIGHT", "5.8"))
+
     # --- Rate limiting (Binance 6000 weight/min, shared Render IP) ---
     RATE_LIMIT_BUDGET_PER_MIN: int = int(os.getenv("RATE_LIMIT_BUDGET_PER_MIN", "4500"))
     # Order book snapshots are cached this many minutes (weight 5 each)
@@ -203,7 +234,10 @@ class Settings:
     # Examples: "*/10 * * * *" = every 10 min | "0 * * * *" = hourly | "*/30 * * * *" = every 30 min
     SCHEDULE_CRON: str = os.getenv("SCHEDULE_CRON", "*/10 * * * *")
     ORDER_BOOK_DEPTH: int = int(os.getenv("ORDER_BOOK_DEPTH", "20"))
-    CANDLE_LIMIT: int = int(os.getenv("CANDLE_LIMIT", "200"))
+    # v5.7: 200 -> 300. EMA200 needs warmup: 200 bars give exactly ONE valid
+    # EMA200 value (min_periods=period) - statistically weak. 300 bars leave
+    # 100 warmup bars. Binance klines weight is unchanged (101-500 -> weight 2).
+    CANDLE_LIMIT: int = int(os.getenv("CANDLE_LIMIT", "300"))
 
     # --- Symbol Selection ---
     # When True: fetch ALL USDT pairs listed on Binance (~400 symbols) and use them

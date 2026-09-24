@@ -32,10 +32,14 @@ import numpy as np
 from typing import Dict, List, Optional
 from config.settings import settings
 from src.strategies import (
-    # 3 powerful composite strategies only (clean & focused)
+    # Original trio (calibration reference stack)
     TrendPullbackStrategy,
     LiquiditySweepReversalStrategy,
     VolatilityBreakoutStrategy,
+    # v5.7 Signal Stack trio (user-specified)
+    TripleConfluenceTrendStrategy,
+    BBMeanReversionStrategy,
+    MACDBreakoutStrategy,
     Signal
 )
 from src.indicators import technical as ta
@@ -56,16 +60,26 @@ class SignalScorer:
     DIRECTION_THRESHOLD = 8.0
 
     def __init__(self):
+        # Original calibrated trio
         self.strategies = [
-            # 3 powerful composite strategies (clean & focused)
             TrendPullbackStrategy(weight=2.0),                # buy strength on pullbacks
             LiquiditySweepReversalStrategy(weight=2.0),       # join stop hunts reversal
             VolatilityBreakoutStrategy(weight=1.8),           # squeeze breakout with volume
         ]
+        # v5.7 Signal Stack trio (user-specified, settings-gated)
+        if settings.STRATEGY_TRIPLE_TREND_ENABLED:
+            self.strategies.append(TripleConfluenceTrendStrategy(
+                weight=settings.STRATEGY_TRIPLE_TREND_WEIGHT))
+        if settings.STRATEGY_BB_MEAN_REV_ENABLED:
+            self.strategies.append(BBMeanReversionStrategy(
+                weight=settings.STRATEGY_BB_MEAN_REV_WEIGHT))
+        if settings.STRATEGY_MACD_BREAKOUT_ENABLED:
+            self.strategies.append(MACDBreakoutStrategy(
+                weight=settings.STRATEGY_MACD_BREAKOUT_WEIGHT))
         self.total_weight = sum(s.weight for s in self.strategies)
         log.info(
             f"[cyan]SignalScorer[/] initialized with {len(self.strategies)} composite strategies "
-            f"(strength x confluence confidence model)"
+            f"(strength x confluence confidence model, total weight {self.total_weight:.1f})"
         )
 
     # ------------------------------------------------------------------
@@ -101,7 +115,17 @@ class SignalScorer:
 
         if agree_w > 0:
             avg_strength = agree_strength_w / agree_w
-            confluence = agree_w / total_w
+            # v5.7: confluence is measured against the CALIBRATED reference
+            # stack weight (5.8), NOT the live total. Adding strategies must
+            # never dilute the confidence scale (with 6 strategies the live
+            # total is 10.0 and a lone signal would sink 64% -> 58%, making
+            # MIN_CONFIDENCE=68 silently demand 3-of-6 agreement). The
+            # original stack is bit-identical (its max agree_w == 5.8);
+            # extra strategies only ADD confluence when they agree, capped
+            # at 1.0 so the model can never exceed full unanimity.
+            confluence = min(
+                1.0, agree_w / max(settings.STRATEGY_CONFLUENCE_REF_WEIGHT, 1e-9)
+            )
         else:
             avg_strength = 0.0
             confluence = 0.0

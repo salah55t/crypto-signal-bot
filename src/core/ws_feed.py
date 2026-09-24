@@ -60,7 +60,7 @@ class WSKlineFeed:
     free without colliding.
     """
 
-    MAX_BARS = 300  # headroom above CANDLE_LIMIT=200 and map lookback=168
+    MAX_BARS = 400  # headroom above CANDLE_LIMIT=300 (v5.7, EMA200 warmup) and map lookback=168
 
     def __init__(self):
         self._bars: Dict[str, deque] = {}   # keyed "SYMBOL|interval"
