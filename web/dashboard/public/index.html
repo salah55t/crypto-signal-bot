@@ -121,14 +121,32 @@
       </div>
     </section>
 
-    <!-- Tab: Market groups (v5.2 leader/follower classification) -->
+    <!-- Tab: Market groups (v5.2 leader/follower classification + v5.4 market cycle) -->
     <section class="tab-content" id="tab-market-map">
       <div class="section-title">
         <h2>🧭 مجموعات السوق — من يتبع من؟</h2>
         <span id="marketMapUpdated" style="color: var(--text-muted); font-size: 0.85em;"></span>
       </div>
+
+      <!-- v5.4: market cycle via leader coins -->
+      <div class="glass" id="marketCyclePanel" style="margin-bottom:12px; padding:12px; display:none;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
+          <b>🎯 دورة تحليل السوق — العملات السيدة</b>
+          <span id="mcVerdict" style="font-weight:700;"></span>
+        </div>
+        <div id="mcPosture" style="margin-bottom:10px; font-size:0.95em;"></div>
+        <div id="mcLeaders" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px;"></div>
+        <div style="color:var(--text-muted); font-size:0.85em; margin-bottom:4px;"><b>سياسة المجموعات:</b></div>
+        <ul id="mcPolicy" style="margin:0; padding-inline-start:18px; color:var(--text); font-size:0.9em;"></ul>
+      </div>
+
       <div class="positions-list" id="marketMap">
         <div class="empty glass">جاري التحميل…</div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <button id="groupsFileBtn" style="padding:8px 14px; border-radius:8px; border:1px solid var(--border); background:transparent; color:var(--text); cursor:pointer;">📄 عرض ملف التصنيف (market_groups.txt)</button>
+        <pre id="groupsFileBox" class="glass" style="display:none; margin-top:10px; padding:12px; overflow:auto; max-height:420px; font-size:0.8em; white-space:pre-wrap; direction:rtl; text-align:right;"></pre>
       </div>
     </section>
 

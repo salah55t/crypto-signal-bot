@@ -582,8 +582,65 @@ async function fetchMarketMap() {
   }
 }
 
+// v5.4: human-readable classification file viewer (decision-making aid)
+const $groupsFileBtn = document.getElementById('groupsFileBtn');
+if ($groupsFileBtn) {
+  $groupsFileBtn.addEventListener('click', async () => {
+    const $box = document.getElementById('groupsFileBox');
+    if ($box.style.display === 'none' || !$box.style.display) {
+      if (!$box.dataset.loaded) {
+        try {
+          const r = await fetch(`${API}/market-groups-file`);
+          $box.textContent = await r.text();
+          $box.dataset.loaded = '1';
+        } catch (e) {
+          $box.textContent = 'تعذر جلب الملف: ' + e.message;
+        }
+      }
+      $box.style.display = 'block';
+      $groupsFileBtn.textContent = '📄 إخفاء ملف التصنيف';
+    } else {
+      $box.style.display = 'none';
+      $groupsFileBtn.textContent = '📄 عرض ملف التصنيف (market_groups.txt)';
+    }
+  });
+}
+
+// v5.4: market cycle verdict (leader-coin deep read) above the groups
+const CYCLE_BADGE = {
+  strong_bullish: ['🟢🟢 صاعد بقوة', 'var(--green)'],
+  bullish: ['🟢 صاعد', 'var(--green)'],
+  neutral: ['⚪ متوازن', 'var(--text-muted)'],
+  bearish: ['🔴 هابط', 'var(--red)'],
+  strong_bearish: ['🔴🔴 هابط بقوة', 'var(--red)'],
+};
+
+function renderMarketCycle(cycle) {
+  const $panel = document.getElementById('marketCyclePanel');
+  if (!$panel) return;
+  if (!cycle || !cycle.market) { $panel.style.display = 'none'; return; }
+  const mk = cycle.market;
+  const [vLabel, vColor] = CYCLE_BADGE[mk.verdict] || CYCLE_BADGE.neutral;
+  document.getElementById('mcVerdict').innerHTML =
+    `<span style="color:${vColor}">${vLabel} (${mk.score}/100)</span>`;
+  document.getElementById('mcPosture').textContent = mk.posture_ar || '';
+  const leaders = cycle.leaders || {};
+  document.getElementById('mcLeaders').innerHTML = Object.entries(leaders).map(([ld, a]) => {
+    const [ll, lc] = CYCLE_BADGE[a.verdict] || CYCLE_BADGE.neutral;
+    const chg = a.chg_24h_pct != null ? `${a.chg_24h_pct > 0 ? '+' : ''}${a.chg_24h_pct}%` : '—';
+    return `<span class="glass" style="padding:6px 10px; display:inline-block;">` +
+      `<b>${escapeHtml(ld.replace('USDT', ''))}</b> ` +
+      `<span style="color:${lc}; font-weight:600;">${ll}</span>` +
+      `<span style="color:var(--text-muted); font-size:0.85em;"> · RSI ${a.rsi14} · 24h ${chg} · ${a.followers} تابع</span></span>`;
+  }).join('');
+  document.getElementById('mcPolicy').innerHTML =
+    (mk.policy || []).map(p => `<li>${escapeHtml(p.text_ar || '')}</li>`).join('');
+  $panel.style.display = 'block';
+}
+
 function renderMarketMap(data) {
   const $map = document.getElementById('marketMap');
+  renderMarketCycle(data && data.cycle);
   if (!data || data.error || !data.groups) {
     $map.innerHTML = '<div class="empty glass">لا توجد بيانات تصنيف بعد.</div>';
     return;
@@ -598,8 +655,9 @@ function renderMarketMap(data) {
     return;
   }
   const upd = data.updated_at ? new Date(data.updated_at).toLocaleString('ar') : '';
+  const hours = data.refresh_hours || 6;
   document.getElementById('marketMapUpdated').textContent =
-    upd ? `آخر تحديث: ${upd} · تُحدّث كل 6 ساعات` : '';
+    upd ? `آخر تحديث: ${upd} · تُحدّث كل ${hours} ساعات` : '';
 
   $map.innerHTML = order.map(g => {
     const isLeader = g !== 'independent';

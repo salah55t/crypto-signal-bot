@@ -21,7 +21,7 @@ from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -202,18 +202,50 @@ async def get_pending_entries():
 
 @app.get("/api/market-map")
 async def get_market_map(refresh: bool = False):
-    """v5.2: leader/follower correlation groups + leader trends.
+    """v5.2/v5.4: leader/follower groups + leader trends + market cycle.
 
-    Serves the cached map (recomputed at most every MARKET_MAP_REFRESH_HOURS).
-    Pass ?refresh=true to force a rebuild (blocking, ~1 API call per symbol).
+    Serves the cached map (recomputed at most every MARKET_MAP_REFRESH_HOURS)
+    plus the leader-coin market-cycle verdict (cached up to
+    MARKET_CYCLE_REFRESH_MIN). Pass ?refresh=true to force a rebuild
+    (blocking, ~1 API call per symbol).
     """
     from src.analysis.market_map import market_map
     try:
         market_map.get_map(force=refresh)  # rebuild now if refresh=True
-        return market_map.grouped_view()
+        view = market_map.grouped_view()
+        try:
+            view["cycle"] = market_map.run_market_cycle(force=refresh)
+        except Exception as ce:
+            log.warning(f"Market cycle unavailable: {ce}")
+            view["cycle"] = None
+        return view
     except Exception as e:
         log.error(f"Market map error: {e}")
-        return {"error": str(e), "groups": {}, "leaders": {}}
+        return {"error": str(e), "groups": {}, "leaders": {}, "cycle": None}
+
+
+@app.get("/api/market-groups-file", response_class=PlainTextResponse)
+async def get_market_groups_file():
+    """v5.4: the human-readable Arabic classification/decision file.
+
+    Serves data/market_groups.txt (built on demand the first time).
+    """
+    from src.analysis.market_map import market_map
+    path = Path(settings.MARKET_GROUPS_FILE)
+    try:
+        if not path.exists():
+            market_map.get_map()
+            market_map.run_market_cycle()
+        if path.exists():
+            return PlainTextResponse(
+                path.read_text(encoding="utf-8"), media_type="text/plain; charset=utf-8"
+            )
+    except Exception as e:
+        log.error(f"Groups file error: {e}")
+    return PlainTextResponse(
+        "الملف غير متاح بعد — يُبنى تلقائياً مع أول دورة تحليل للسوق.",
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 @app.get("/api/all-analyses")

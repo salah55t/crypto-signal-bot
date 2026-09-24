@@ -212,6 +212,19 @@ class Settings:
     LEADER_BEARISH_CONF_PENALTY: float = float(os.getenv("LEADER_BEARISH_CONF_PENALTY", "20"))
     # Regime action: bullish leader -> confidence += corr * BOOST (rank-only)
     LEADER_BULLISH_CONF_BOOST: float = float(os.getenv("LEADER_BULLISH_CONF_BOOST", "8"))
+    # v5.4: a build where MORE than this fraction of the universe failed to
+    # fetch candles is REJECTED (not cached) - a leaders-only/holey map used
+    # to be saved as "fresh" and the dashboard groups tab stayed empty for
+    # the whole 6h TTL (root cause of the empty market-groups tab).
+    MARKET_MAP_MAX_FAIL_PCT: float = float(os.getenv("MARKET_MAP_MAX_FAIL_PCT", "0.25"))
+
+    # --- Market cycle via leader coins (v5.4) ---
+    # "دورة تحليل السوق عبر العملات السيدة": a periodic deep read of the
+    # leader coins (trend + RSI + momentum + SMA50 distance) that produces a
+    # market-wide verdict and a human-readable classification file
+    # (data/market_groups.txt) used for decision-making.
+    MARKET_CYCLE_REFRESH_MIN: int = int(os.getenv("MARKET_CYCLE_REFRESH_MIN", "60"))
+    MARKET_GROUPS_FILE: str = os.getenv("MARKET_GROUPS_FILE", "data/market_groups.txt")
 
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

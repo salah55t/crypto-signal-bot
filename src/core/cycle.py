@@ -400,9 +400,18 @@ def run_analysis_cycle():
     # ---- STEP 0.5: pre-warm the Market Map OUTSIDE the analysis burst ----
     # Its ~300 request-weight then ages out of the sliding 60s window while
     # the per-symbol analysis ramps up, instead of stacking right after it.
+    # v5.4: also run the market cycle via the leader coins (BTC/ETH/SOL/XRP)
+    # - trend/RSI/momentum read + market-wide verdict + the human-readable
+    # classification file (data/market_groups.txt) refreshed every hour.
     try:
         from src.analysis.market_map import market_map
         market_map.get_map()
+        mk = (market_map.run_market_cycle() or {}).get("market") or {}
+        if mk:
+            log.info(
+                f"[bold cyan]Market posture:[/] {mk.get('verdict')} "
+                f"({mk.get('score')}/100) - {mk.get('posture_ar')}"
+            )
     except Exception as e:
         log.debug(f"Market map pre-warm skipped: {e}")
 
