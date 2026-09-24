@@ -309,6 +309,26 @@ class Settings:
     MARKET_CYCLE_REFRESH_MIN: int = int(os.getenv("MARKET_CYCLE_REFRESH_MIN", "60"))
     MARKET_GROUPS_FILE: str = os.getenv("MARKET_GROUPS_FILE", "data/market_groups.txt")
 
+    # --- v5.9 AI Advisor (CodeCraft API - OpenAI-compatible LLM relay) ---
+    # The user obtained an API key from https://codecraftapi.com (cc_...).
+    # We use it to generate a short ARABIC technical explanation of every
+    # recommendation ("تحليل ذكي") that is appended to the Telegram card and
+    # shown on the dashboard. Fully optional: if the key is missing or the
+    # call fails, the bot sends everything as before (graceful degradation).
+    CODECRAFT_BASE_URL: str = os.getenv("CODECRAFT_BASE_URL", "https://codecraftapi.com")
+    CODECRAFT_API_KEY: str = os.getenv("CODECRAFT_API_KEY", "")
+    AI_ADVISOR_ENABLED: bool = os.getenv("AI_ADVISOR_ENABLED", "true").lower() == "true"
+    # Fast + cheap model is the right default for 2-3 sentence answers.
+    # Catalog (v1/models) includes: gpt-5.5/5.6-*, claude-opus-*, gemini-3.*,
+    # glm-5.*, deepseek-v4-*, qwen3.8-*, kimi-k3, grok-4.*, muse-spark-1.1.
+    AI_ADVISOR_MODEL: str = os.getenv("AI_ADVISOR_MODEL", "gemini-3.6-flash")
+    # Per-call timeout (seconds) and how many top recommendations get comments
+    AI_ADVISOR_TIMEOUT: int = int(os.getenv("AI_ADVISOR_TIMEOUT", "25"))
+    AI_ADVISOR_MAX_RECS: int = int(os.getenv("AI_ADVISOR_MAX_RECS", "5"))
+    # Cache TTL (hours) for a generated comment - aligns with the Telegram
+    # re-notification cooldown so the same setup is not re-explained.
+    AI_ADVISOR_CACHE_HOURS: float = float(os.getenv("AI_ADVISOR_CACHE_HOURS", "4"))
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "data/logs/bot.log")

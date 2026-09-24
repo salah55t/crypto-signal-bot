@@ -214,6 +214,11 @@ function renderRecommendations(recs) {
             <div class="reasons-title">أبرز الإشارات</div>
             ${reasons || '<div class="reason">لا توجد إشارات محددة</div>'}
           </div>
+          ${r.ai_comment ? `
+          <div class="ai-note">
+            <div class="ai-note-title">🤖 تحليل ذكي (AI${r.ai_model ? ` — ${escapeHtml(r.ai_model)}` : ''})</div>
+            <div class="ai-note-text">${escapeHtml(r.ai_comment)}</div>
+          </div>` : ''}
         </div>
       </div>
     `;

@@ -442,6 +442,20 @@ def run_analysis_cycle():
         )
         return
 
+    # ---- STEP 3.5: AI advisor - Arabic technical comments (v5.9, optional) ----
+    # Adds rec["ai_comment"] via the user's CodeCraft API key. Optional:
+    # disabled without a key, and any failure is silently skipped. The
+    # enriched list is re-saved so the dashboard + WS see the comment too.
+    try:
+        from src.ai import ai_advisor
+        if ai_advisor.enrich_recommendations(recommendations):
+            snap = load_json(RECOMMENDATIONS_FILE, default={})
+            if isinstance(snap, dict):
+                snap["top_recommendations"] = to_json_safe(recommendations)
+                save_json(snap, RECOMMENDATIONS_FILE)
+    except Exception as e:
+        log.warning(f"AI advisor skipped: {e}")
+
     # ---- STEP 4: log + notify ----
     file_logger.log_recommendations(recommendations)
     telegram_notifier.send_recommendations(recommendations)

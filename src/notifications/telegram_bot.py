@@ -217,6 +217,15 @@ class TelegramNotifier:
                 reasons.append(tr(r))
         reasons_text = "\n".join(f"• {r}" for r in reasons[:8]) or "لا توجد إشارات محددة"
 
+        # v5.9: AI advisor comment (Arabic, already sanitized at creation)
+        ai_comment = str(rec.get("ai_comment", "") or "").strip()
+        ai_line = ""
+        if ai_comment:
+            ai_line = (
+                f"\n🤖 *تحليل ذكي (AI):*\n"
+                f"_{ai_comment}_\n"
+            )
+
         pos_tag = f" (صفقة {position_num}/{total})" if position_num else ""
         return (
             f"{emoji} *{symbol}* — `{direction_ar}`{pos_tag}"
@@ -233,6 +242,7 @@ class TelegramNotifier:
             f"📊 *ATR:* `{atr_pct:.2f}%`\n"
             f"{confluence_lines}"
             f"\n━━━━━━━━━━━━━━━\n"
+            f"{ai_line}"
             f"*الإشارات:*\n{reasons_text}"
         )
 

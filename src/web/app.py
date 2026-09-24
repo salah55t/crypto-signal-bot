@@ -370,6 +370,11 @@ async def get_public_config():
         "bottom_conf_cap": settings.BOTTOM_CONF_CAP,
         "timeframes": settings.TIMEFRAMES,
         "run_mode": settings.RUN_MODE,
+        # v5.9: AI advisor status (NO key material - enabled/model only)
+        "ai_advisor_enabled": bool(
+            settings.AI_ADVISOR_ENABLED and settings.CODECRAFT_API_KEY
+        ),
+        "ai_advisor_model": settings.AI_ADVISOR_MODEL,
     }
 
 

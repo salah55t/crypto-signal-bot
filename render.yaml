@@ -196,6 +196,15 @@ services:
       - key: TELEGRAM_ENABLED
         value: "false"
 
+      # === v5.9 AI Advisor (CodeCraft API - OpenAI-compatible LLM relay) ===
+      # Set the real key in the Render dashboard (never in this file).
+      - key: CODECRAFT_API_KEY
+        sync: false
+      - key: AI_ADVISOR_ENABLED
+        value: "true"
+      - key: AI_ADVISOR_MODEL
+        value: "gemini-3.6-flash"
+
       # === Python Settings ===
       - key: PYTHON_VERSION
         value: "3.11.9"
