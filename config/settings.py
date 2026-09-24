@@ -130,11 +130,31 @@ class Settings:
     # Structure exits: Ichimoku regime flip / opposite strong signal
     STRUCTURAL_EXITS_ENABLED: bool = os.getenv(
         "STRUCTURAL_EXITS_ENABLED", "true").lower() == "true"
-    OPPOSITE_SIGNAL_CONF: float = float(os.getenv("OPPOSITE_SIGNAL_CONF", "75"))
+    # v5.5: close a position IMMEDIATELY when fresh analysis signals the
+    # opposite direction at/above this confidence. Was 75 -> too slow: a
+    # bearish 60-74% read only "tightened" the SL 0.5% below price, which
+    # LOCKS A LOSS when the trade is underwater, then the stop gets hit.
+    # User rule: bearish analysis on a long = exit now, never wait for SL.
+    OPPOSITE_SIGNAL_CONF: float = float(os.getenv("OPPOSITE_SIGNAL_CONF", "55"))
+    # Milder opposite pressure (conf >= this, < exit threshold) -> tighten
+    # SL to 0.5% below price as a defensive step instead of exiting
+    SIGNAL_TIGHTEN_CONF: float = float(os.getenv("SIGNAL_TIGHTEN_CONF", "40"))
+    # v5.5 continuation updates: when analysis still says "up" with decent
+    # confidence AND the trade is already in profit, extend the target AND
+    # raise the SL in the SAME update so every extension secures profit.
+    # (Old behaviour extended TP alone - 3 updates could still end negative.)
+    CONTINUATION_CONF: float = float(os.getenv("CONTINUATION_CONF", "65"))
+    # Min unrealized profit (%) before a continuation TP-extension may fire
+    CONTINUATION_MIN_PROFIT_PCT: float = float(
+        os.getenv("CONTINUATION_MIN_PROFIT_PCT", "1.0"))
+    # Fraction of the CURRENT profit to lock into the SL on continuation
+    # (0.5 = trade up +3% -> SL to at least +1.5%; ladder may raise it more)
+    PROFIT_LOCK_FRACTION: float = float(os.getenv("PROFIT_LOCK_FRACTION", "0.5"))
     # Time stop: a trade that goes nowhere is dead capital
-    MAX_TRADE_HOURS: float = float(os.getenv("MAX_TRADE_HOURS", "24"))
+    # v5.5: scaled up for the 4h timeframe (24h = just 6 bars on 4h)
+    MAX_TRADE_HOURS: float = float(os.getenv("MAX_TRADE_HOURS", "72"))
     TIME_STOP_MIN_PNL_PCT: float = float(os.getenv("TIME_STOP_MIN_PNL_PCT", "0.5"))
-    ABSOLUTE_MAX_TRADE_HOURS: float = float(os.getenv("ABSOLUTE_MAX_TRADE_HOURS", "48"))
+    ABSOLUTE_MAX_TRADE_HOURS: float = float(os.getenv("ABSOLUTE_MAX_TRADE_HOURS", "120"))
 
     # --- Rate limiting (Binance 6000 weight/min, shared Render IP) ---
     RATE_LIMIT_BUDGET_PER_MIN: int = int(os.getenv("RATE_LIMIT_BUDGET_PER_MIN", "4500"))
@@ -143,10 +163,12 @@ class Settings:
 
     # --- v5.3 WebSocket candle feed (zero REST weight for klines) ---
     # Binance WS streams bypass the REST request-weight budget entirely.
-    # One combined connection keeps a live 1h candle cache for the universe,
+    # One combined connection keeps a live candle cache for the universe,
     # seeded by the first REST cycle and updated incrementally. Every consumer
     # (analyzer, bottom scanner, market map, backtests via REST) reads the
     # cache first and falls back to REST when it is disabled/stale.
+    # v5.5: multi-interval - the feed subscribes to every interval in
+    # WS_INTERVALS (strategy TFs + 1h) with per-(symbol,interval) caches.
     USE_WS_FEED: bool = os.getenv("USE_WS_FEED", "true").lower() == "true"
     # Market-data WS endpoint (data-stream.binance.vision = public data twin
     # of data-api.binance.vision; stream.binance.com also works)
@@ -170,7 +192,13 @@ class Settings:
     # v5.1 (2026-09-23): default switched 15m -> 1h. Comprehensive backtest
     # (18 symbols x 3000 bars + 8 x 2000 @15m) showed 1h expectancy +0.815%/trade
     # (PF 1.83) vs 15m +0.127%/trade (PF 1.15) — 6.4x better per trade.
-    TIMEFRAMES: list = [tf.strip() for tf in os.getenv("TIMEFRAMES", "1h").split(",")]
+    # v5.5 (2026-09-24): user moved the primary timeframe to 4h (position
+    # trading; fewer noise-driven updates, cleaner trend following). Market
+    # map / market-cycle correlation stays on 1h regardless.
+    TIMEFRAMES: list = [tf.strip() for tf in os.getenv("TIMEFRAMES", "4h").split(",")]
+    # v5.5: intervals the WS kline feed subscribes to = strategy TFs + 1h
+    # (1h always kept: market map correlation + leader cycle read it free).
+    WS_INTERVALS: list = sorted({*TIMEFRAMES, "1h"})
     # Run every 10 minutes by default (was: hourly)
     # Examples: "*/10 * * * *" = every 10 min | "0 * * * *" = hourly | "*/30 * * * *" = every 30 min
     SCHEDULE_CRON: str = os.getenv("SCHEDULE_CRON", "*/10 * * * *")

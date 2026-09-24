@@ -88,8 +88,9 @@ services:
       # === Analysis Settings ===
       # Timeframes: "1h" (default, v5.1: 6.4x expectancy of 15m in backtest)
       # | "15m" for scalping | "15m,1h" for multi-TF confirmation | "4h,1d" for position trading
+      # v5.5: primary timeframe moved to 4h (user decision, position trading)
       - key: TIMEFRAMES
-        value: "1h"
+        value: "4h"
       # Cron: every 10 minutes (1h candles change slowly; position monitor
       # still runs every 1 minute independently for SL/TP/trailing)
       - key: SCHEDULE_CRON
@@ -119,9 +120,10 @@ services:
         value: "false"
 
       # === v5.3 WebSocket candle feed + API pressure relief ===
-      # WS streams bypass the REST weight budget: live 1h candles for the
+      # WS streams bypass the REST weight budget: live candles for the
       # whole universe with ~0 REST klines weight (the analyzer + bottom
       # scanner used to refetch the same 150 symbols twice per cycle)
+      # v5.5: multi-interval - subscribes to strategy TFs + 1h (1h + 4h)
       - key: USE_WS_FEED
         value: "true"
       - key: WS_FRESH_TTL_MIN
@@ -129,6 +131,28 @@ services:
       # Cache the dynamic symbol list for 1h (was: weight-80 refetch every cycle)
       - key: SYMBOL_REFRESH_MIN
         value: "60"
+
+      # === v5.5 analysis-driven trade management ===
+      # Close a position NOW when fresh analysis signals the opposite
+      # direction (was 75 - too slow; trades died at the SL instead)
+      - key: OPPOSITE_SIGNAL_CONF
+        value: "55"
+      # Milder opposite pressure (40-55%) -> defend: SL 0.5% below price
+      - key: SIGNAL_TIGHTEN_CONF
+        value: "40"
+      # Bullish continuation: extend the target AND lock part of the profit
+      # in the SAME update (SL raised to entry + 50% of current profit)
+      - key: CONTINUATION_CONF
+        value: "65"
+      - key: CONTINUATION_MIN_PROFIT_PCT
+        value: "1.0"
+      - key: PROFIT_LOCK_FRACTION
+        value: "0.5"
+      # Time stop scaled for 4h bars (24h was only 6 bars on 4h)
+      - key: MAX_TRADE_HOURS
+        value: "72"
+      - key: ABSOLUTE_MAX_TRADE_HOURS
+        value: "120"
 
       # === Reinforcement Learning (OPTIONAL, ADVANCED) ===
       # Requires heavy deps (~500MB PyTorch). NOT recommended on Free Tier (512MB RAM)

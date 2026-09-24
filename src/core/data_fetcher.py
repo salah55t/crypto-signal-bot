@@ -52,17 +52,19 @@ class DataFetcher:
                     limit: int = 200) -> pd.DataFrame:
         """Get historical candles for a symbol as a DataFrame.
 
-        v5.3: for 1h candles the live WebSocket cache is served first (zero
-        REST weight - Binance WS streams bypass the request-weight budget).
+        v5.3: for cached intervals the live WebSocket cache is served first
+        (zero REST weight - Binance WS streams bypass the request-weight
+        budget). v5.5: every interval in settings.WS_INTERVALS is cached
+        (strategy TFs + 1h), with per-(symbol, interval) keys.
         Falls back to REST when the feed is disabled/stale/short, and any
         REST fetch re-ingests into the cache so the next cycle reads free.
         """
         if interval not in DataFetcher.INTERVALS:
             raise ValueError(f"Invalid interval '{interval}'. Valid: {DataFetcher.INTERVALS}")
-        if interval == "1h":
+        if interval in (settings.WS_INTERVALS or ["1h"]):
             try:
                 from src.core.ws_feed import ws_feed
-                cached = ws_feed.get_cached(symbol, limit)
+                cached = ws_feed.get_cached(symbol, limit, interval=interval)
                 if cached is not None:
                     return cached
             except Exception:
@@ -75,10 +77,11 @@ class DataFetcher:
         """REST fetch + cache ingest (bypasses the WS read - used by reseeds)."""
         raw = binance_client.get_klines(symbol, interval, limit=limit)
         df = DataFetcher.klines_to_df(raw)
-        if interval == "1h" and df is not None and not df.empty:
+        if interval in (settings.WS_INTERVALS or ["1h"]) \
+                and df is not None and not df.empty:
             try:
                 from src.core.ws_feed import ws_feed
-                ws_feed.ingest(symbol, df)
+                ws_feed.ingest(symbol, df, interval=interval)
             except Exception:
                 pass
         return df

@@ -75,7 +75,7 @@ def test_event_replaces_inprogress_bar(feed):
     feed.ingest("BTCUSDT", df)
     last_open = int(df.index[-1].timestamp() * 1000)
     feed._on_message(message=_event("BTCUSDT", last_open, 123.45))
-    bars = feed._bars["BTCUSDT"]
+    bars = feed._bars["BTCUSDT|1h"]   # v5.5: per-(symbol, interval) keys
     assert len(bars) == 5                       # replaced, not appended
     assert float(bars[-1][4]) == 123.45         # updated close
 
@@ -85,17 +85,17 @@ def test_event_appends_new_bar(feed):
     feed.ingest("BTCUSDT", df)
     last_open = int(df.index[-1].timestamp() * 1000)
     feed._on_message(message=_event("BTCUSDT", last_open + 3_600_000, 130.0))
-    assert len(feed._bars["BTCUSDT"]) == 6
-    assert float(feed._bars["BTCUSDT"][-1][4]) == 130.0
+    assert len(feed._bars["BTCUSDT|1h"]) == 6
+    assert float(feed._bars["BTCUSDT|1h"][-1][4]) == 130.0
 
 
 def test_event_ignores_stale_open_time(feed):
     df = DataFetcher.klines_to_df(_synthetic_rows(5))
     feed.ingest("BTCUSDT", df)
-    before = list(feed._bars["BTCUSDT"])
+    before = list(feed._bars["BTCUSDT|1h"])
     old_open = int(df.index[0].timestamp() * 1000)
     feed._on_message(message=_event("BTCUSDT", old_open, 99.0))
-    assert list(feed._bars["BTCUSDT"]) == before  # duplicate/stale -> untouched
+    assert list(feed._bars["BTCUSDT|1h"]) == before  # duplicate/stale -> untouched
 
 
 def test_malformed_message_never_raises(feed):
@@ -182,8 +182,8 @@ def test_get_candles_rest_fallback_ingests_cache(monkeypatch):
     out = data_fetcher.get_candles("SOLUSDT", "1h", 200)
     assert len(out) == 200
     # REST fetch re-seeds the WS cache -> next cycle reads free
-    assert len(ws_feed._bars.get("SOLUSDT", [])) == 200
-    assert ws_feed._bars["SOLUSDT"][-1][4] == rows[-1][4]
+    assert len(ws_feed._bars.get("SOLUSDT|1h", [])) == 200
+    assert ws_feed._bars["SOLUSDT|1h"][-1][4] == rows[-1][4]
 
 
 def test_non_1h_intervals_skip_cache(monkeypatch):
@@ -208,7 +208,7 @@ def test_non_1h_intervals_skip_cache(monkeypatch):
 def test_long_gap_flags_reseed(feed):
     df = DataFetcher.klines_to_df(_synthetic_rows(200))
     feed.ingest("BTCUSDT", df)
-    feed._last_event["BTCUSDT"] = time.monotonic() - 600  # 10 min gap
+    feed._last_event["BTCUSDT|1h"] = time.monotonic() - 600  # 10 min gap
     feed._on_open()
     assert feed._needs_reseed is True
 
@@ -216,7 +216,7 @@ def test_long_gap_flags_reseed(feed):
 def test_short_gap_no_reseed(feed):
     df = DataFetcher.klines_to_df(_synthetic_rows(200))
     feed.ingest("BTCUSDT", df)
-    feed._last_event["BTCUSDT"] = time.monotonic() - 5
+    feed._last_event["BTCUSDT|1h"] = time.monotonic() - 5
     feed._on_open()
     assert feed._needs_reseed is False
 

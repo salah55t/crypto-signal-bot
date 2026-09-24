@@ -637,21 +637,35 @@ class RiskManager:
           "tighten"     -> raise the SL to pos["_structural_sl"] (set by caller)
           "none"
         Only called from the main analysis cycle (klines-backed signals).
+
+        v5.5 graduated opposite-signal response (user rule: when the analysis
+        of the trade turns bearish on a long, CLOSE IT NOW - never wait for
+        the stop to be hit, and never "tighten" into a locked loss):
+          conf >= OPPOSITE_SIGNAL_CONF (55)   -> exit immediately
+          conf >= SIGNAL_TIGHTEN_CONF (40)    -> defend: SL 0.5% below price
         """
         if not settings.STRUCTURAL_EXITS_ENABLED or not sig:
             return ("none", None)
         icho = sig.get("ichimoku") or {}
         direction = pos.get("direction", "bullish")
 
-        # 1) Opposite strong confluence signal -> thesis invalid
+        # 1) Opposite analysis signal -> graduated response
         sig_dir = sig.get("direction")
         sig_conf = float(sig.get("confidence", 0) or 0)
         if (sig_dir and sig_dir != direction
-                and sig_dir in ("bullish", "bearish")
-                and sig_conf >= settings.OPPOSITE_SIGNAL_CONF):
-            return ("exit",
-                    f"Opposite {sig_dir} signal (conf {sig_conf:.0f}% >= "
-                    f"{settings.OPPOSITE_SIGNAL_CONF:.0f}%)")
+                and sig_dir in ("bullish", "bearish")):
+            if sig_conf >= settings.OPPOSITE_SIGNAL_CONF:
+                return ("exit",
+                        f"Opposite {sig_dir} signal (conf {sig_conf:.0f}% >= "
+                        f"{settings.OPPOSITE_SIGNAL_CONF:.0f}%) - closing now")
+            if sig_conf >= settings.SIGNAL_TIGHTEN_CONF:
+                if direction == "bullish":
+                    level = current_price * 0.995
+                else:
+                    level = current_price * 1.005
+                return ("tighten",
+                        f"Opposite {sig_dir} pressure defence "
+                        f"({level:.4f})")
 
         if not icho:
             return ("none", None)
@@ -927,21 +941,29 @@ class RiskManager:
                     if new_sl <= current_sl:
                         new_sl = None
 
-                # Extend TP if strong bullish continuation
+                # Extend TP on bullish continuation - v5.5: TOGETHER with a
+                # profit-lock SL raise, so an extension can never leave the
+                # trade exposed to a full round-trip (the "3 updates then
+                # negative" failure mode). Requirements:
+                #   - fresh analysis still bullish with conf >= CONTINUATION_CONF
+                #   - trade already in profit >= CONTINUATION_MIN_PROFIT_PCT
                 signal_data = market_signals.get(symbol, {})
-                if signal_data.get("direction") == "bullish" and signal_data.get("confidence", 0) > 80:
+                if (signal_data.get("direction") == "bullish"
+                        and signal_data.get("confidence", 0) >= settings.CONTINUATION_CONF
+                        and profit_pct >= settings.CONTINUATION_MIN_PROFIT_PCT):
                     current_tp_distance = current_tp - current
                     if current_tp_distance > 0:
                         # Extend by 50% of current TP distance
                         new_tp = current_tp + current_tp_distance * 0.5
-                        reason += " + Extended TP (strong bullish signal)"
-
-                # Tighten SL if bearish signal appears (overrides ladder)
-                if signal_data.get("direction") == "bearish" and signal_data.get("confidence", 0) > 60:
-                    tighten_sl = current * 0.995  # 0.5% below current
-                    if tighten_sl > current_sl:
-                        new_sl = tighten_sl
-                        reason = f"Tightened SL (bearish signal detected, conf={signal_data['confidence']:.0f}%)"
+                        reason += " + Extended TP (bullish continuation)"
+                        # lock a fraction of the CURRENT profit into the SL
+                        locked_pct = profit_pct * settings.PROFIT_LOCK_FRACTION
+                        lock_sl = entry * (1 + locked_pct / 100.0)
+                        lock_sl = min(lock_sl, current * 0.999)  # never above price
+                        floor_sl = new_sl if new_sl is not None else current_sl
+                        if lock_sl > floor_sl:
+                            new_sl = lock_sl
+                            reason += f" + Locked {locked_pct:.2f}% profit"
 
             elif pos["direction"] == "bearish":
                 # mirror ladder for bearish (chandelier mirrored)
@@ -980,12 +1002,24 @@ class RiskManager:
                     if current_sl is not None and new_sl >= current_sl:
                         new_sl = None
 
+                # v5.5: mirrored continuation (short side). Bullish-signal
+                # exits are handled by the graduated structural pass - the
+                # old loss-locking "tighten" block is deliberately gone.
                 signal_data = market_signals.get(symbol, {})
-                if signal_data.get("direction") == "bullish" and signal_data.get("confidence", 0) > 60:
-                    tighten_sl = current * 1.005
-                    if current_sl is None or tighten_sl < current_sl:
-                        new_sl = tighten_sl
-                        reason = f"Tightened SL (bullish signal detected, conf={signal_data['confidence']:.0f}%)"
+                if (signal_data.get("direction") == "bearish"
+                        and signal_data.get("confidence", 0) >= settings.CONTINUATION_CONF
+                        and profit_pct >= settings.CONTINUATION_MIN_PROFIT_PCT):
+                    current_tp_distance = current - current_tp
+                    if current_tp_distance > 0:
+                        new_tp = current_tp - current_tp_distance * 0.5
+                        reason += " + Extended TP (bearish continuation)"
+                        locked_pct = profit_pct * settings.PROFIT_LOCK_FRACTION
+                        lock_sl = entry * (1 - locked_pct / 100.0)
+                        lock_sl = max(lock_sl, current * 1.001)
+                        floor_sl = new_sl if new_sl is not None else current_sl
+                        if floor_sl is None or lock_sl < floor_sl:
+                            new_sl = lock_sl
+                            reason += f" + Locked {locked_pct:.2f}% profit"
 
             if new_sl is not None or new_tp is not None:
                 result = self.update_position_risk(i, current, new_sl, new_tp, reason)
@@ -1246,6 +1280,9 @@ class RiskManager:
                 "mfe_pct": float(pos.get("mfe_pct", 0.0)),
                 "mae_pct": float(pos.get("mae_pct", 0.0)),
                 "partials_taken": len(pos.get("partial_closes", [])),
+                # v5.5: full SL/TP update history (newest first, capped) so
+                # the dashboard can show WHY each update happened
+                "risk_updates": list(reversed(pos.get("risk_updates", [])))[:10],
                 "time_stop_pending": bool(
                     self._position_age_hours(pos) >= settings.MAX_TRADE_HOURS
                     and pnl_pct < settings.TIME_STOP_MIN_PNL_PCT

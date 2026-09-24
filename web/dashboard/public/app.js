@@ -331,9 +331,35 @@ function renderPositions(positions) {
           <div>SL: <span style="color: var(--red);">${fmtPrice(p.stop_loss)} (${p.sl_distance_pct?.toFixed(2)}%)</span></div>
           <div>TP: <span style="color: var(--green);">${fmtPrice(p.take_profit)} (${p.tp_distance_pct?.toFixed(2)}%)</span></div>
         </div>
+        ${renderRiskUpdates(p.risk_updates)}
       </div>
     `;
   }).join('');
+}
+
+// v5.5: SL/TP update history per position - WHY did the bot touch this trade
+function renderRiskUpdates(updates) {
+  if (!updates || !updates.length) return '';
+  const rows = updates.map(u => {
+    const slChanged = u.old_sl !== u.new_sl;
+    const tpChanged = u.old_tp !== u.new_tp;
+    const change = slChanged || tpChanged
+      ? `SL ${slChanged ? `${fmtPrice(u.old_sl)}→${fmtPrice(u.new_sl)}` : fmtPrice(u.old_sl)}`
+        + (tpChanged ? ` · TP ${fmtPrice(u.old_tp)}→${fmtPrice(u.new_tp)}` : '')
+      : '—';
+    return `
+      <div style="display:flex; flex-direction:column; gap:2px; padding:6px 8px; border-right:2px solid var(--primary); background:var(--bg-tertiary, rgba(255,255,255,0.03)); border-radius:6px; margin-bottom:4px;">
+        <div style="font-size:11px; color:var(--text);">${u.reason || 'تحديث'}</div>
+        <div style="font-size:10px; color:var(--text-muted); font-family:monospace;">${change}</div>
+      </div>`;
+  }).join('');
+  return `
+    <details style="margin-top:8px;">
+      <summary style="cursor:pointer; font-size:11px; color:var(--primary); user-select:none;">
+        🔧 سجل التحديثات (${updates.length}) - لماذا تعدّلت الصفقة؟
+      </summary>
+      <div style="margin-top:6px;">${rows}</div>
+    </details>`;
 }
 
 function renderClosedTrades(trades) {

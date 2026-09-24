@@ -52,13 +52,19 @@ def _kline_event_to_row(k: Dict) -> list:
 
 
 class WSKlineFeed:
-    """Live 1h candle cache fed by one combined-market WebSocket stream."""
+    """Live candle cache fed by one combined-market WebSocket stream.
+
+    v5.5: multi-interval. The feed subscribes to every interval listed in
+    settings.WS_INTERVALS (strategy TFs + 1h) and keys its cache by
+    "SYMBOL|interval", so a 4h strategy and the 1h market map both read
+    free without colliding.
+    """
 
     MAX_BARS = 300  # headroom above CANDLE_LIMIT=200 and map lookback=168
 
     def __init__(self):
-        self._bars: Dict[str, deque] = {}
-        self._last_event: Dict[str, float] = {}
+        self._bars: Dict[str, deque] = {}   # keyed "SYMBOL|interval"
+        self._last_event: Dict[str, float] = {}  # keyed "SYMBOL|interval"
         self._lock = threading.RLock()
         self._started = False
         self._stop = False
@@ -72,6 +78,20 @@ class WSKlineFeed:
         self._reconnect_delay = 5.0
         self._last_msg_ts = 0.0
         self._msg_count = 0
+
+    # ------------------------------------------------------------------
+    # cache keying
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _key(symbol: str, interval: str) -> str:
+        """Per-(symbol, interval) cache key - intervals must never mix."""
+        return f"{symbol.upper().strip()}|{interval}"
+
+    @staticmethod
+    def _intervals() -> list:
+        """Intervals to subscribe (fallback when WS_INTERVALS is empty)."""
+        ivs = list(getattr(settings, "WS_INTERVALS", []) or [])
+        return ivs or ["1h"]
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -103,7 +123,7 @@ class WSKlineFeed:
             target=self._run_loop, name="ws-kline-feed", daemon=True)
         self._thread.start()
         log.info(f"[green]WS kline feed started[/] for {len(self._universe)} symbols "
-                 f"({settings.WS_ENDPOINT})")
+                 f"x {self._intervals()} ({settings.WS_ENDPOINT})")
 
     def stop(self) -> None:
         self._stop = True
@@ -128,7 +148,9 @@ class WSKlineFeed:
         while not self._stop:
             streams = []
             with self._lock:
-                streams = [f"{s.lower()}@kline_1h" for s in self._universe]
+                for iv in self._intervals():
+                    streams.extend(
+                        f"{s.lower()}@kline_{iv}" for s in self._universe)
             if not streams:
                 time.sleep(5.0)
                 continue
@@ -175,22 +197,24 @@ class WSKlineFeed:
                 return
             k = data.get("k") or {}
             sym = data.get("s")
+            interval = k.get("i") or "1h"
             if not sym or not k:
                 return
             row = _kline_event_to_row(k)
             now = time.monotonic()
+            key = self._key(sym, interval)
             with self._lock:
-                bars = self._bars.get(sym)
+                bars = self._bars.get(key)
                 if bars is None:
                     bars = deque(maxlen=self.MAX_BARS)
-                    self._bars[sym] = bars
+                    self._bars[key] = bars
                 if bars and bars[-1][0] == row[0]:
                     bars[-1] = row            # in-progress bar update
                 elif not bars or row[0] > bars[-1][0]:
                     bars.append(row)          # a new bar opened
                     while len(bars) > self.MAX_BARS:
                         bars.popleft()
-                self._last_event[sym] = now
+                self._last_event[key] = now
             self._last_msg_ts = now
             self._msg_count += 1
         except Exception:
@@ -213,19 +237,22 @@ class WSKlineFeed:
         return max(self._last_event.values())
 
     def _reseed_all(self):
-        """REST-refetch every cached symbol once (after long reconnect gaps)."""
+        """REST-refetch every cached series once (after long reconnect gaps)."""
         try:
             from src.core.data_fetcher import DataFetcher  # lazy: avoid circulars
             with self._lock:
-                syms = list(self._bars.keys())
-            log.info(f"[cyan]WS feed[/] reseeding {len(syms)} symbols via REST after gap")
-            for sym in syms:
+                keys = list(self._bars.keys())
+            log.info(f"[cyan]WS feed[/] reseeding {len(keys)} series via REST after gap")
+            for key in keys:
                 if self._stop:
                     return
+                sym, _, interval = key.rpartition("|")
+                if not sym:
+                    continue
                 try:
                     # bypass the cache read - reseed must hit REST directly
-                    df = DataFetcher._get_candles_rest(sym, "1h", 200)
-                    self.ingest(sym, df)
+                    df = DataFetcher._get_candles_rest(sym, interval, 200)
+                    self.ingest(sym, df, interval=interval)
                 except Exception:
                     continue
             with self._lock:
@@ -237,8 +264,8 @@ class WSKlineFeed:
     # ------------------------------------------------------------------
     # public data access
     # ------------------------------------------------------------------
-    def ingest(self, symbol: str, df) -> None:
-        """Populate/refresh the cache from a REST-fetched DataFrame.
+    def ingest(self, symbol: str, df, interval: str = "1h") -> None:
+        """Populate/refresh one (symbol, interval) cache from a REST fetch.
 
         Called by data_fetcher.get_candles so the first REST cycle after a
         deploy seeds the cache with ZERO extra API weight.
@@ -257,40 +284,44 @@ class WSKlineFeed:
                     r.get("taker_buy_quote"), "rest",
                 ])
             now = time.monotonic()
+            key = self._key(symbol, interval)
             with self._lock:
-                bars = self._bars.get(symbol)
+                bars = self._bars.get(key)
                 if bars is None:
                     bars = deque(maxlen=self.MAX_BARS)
-                    self._bars[symbol] = bars
+                    self._bars[key] = bars
                 bars.clear()
                 bars.extend(rows)
-                self._last_event[symbol] = now
+                self._last_event[key] = now
         except Exception as e:
-            log.debug(f"WS ingest failed for {symbol}: {e}")
+            log.debug(f"WS ingest failed for {symbol} {interval}: {e}")
 
-    def fresh(self, symbol: str, min_bars: int = 60) -> bool:
-        """True when the cache has a live-enough series for `symbol`."""
+    def fresh(self, symbol: str, min_bars: int = 60,
+              interval: str = "1h") -> bool:
+        """True when the cache has a live-enough series for the key."""
         if not settings.USE_WS_FEED or not self._started:
             return False
         now = time.monotonic()
+        key = self._key(symbol, interval)
         with self._lock:
-            bars = self._bars.get(symbol)
+            bars = self._bars.get(key)
             if not bars or len(bars) < min_bars:
                 return False
-            last = self._last_event.get(symbol, 0.0)
+            last = self._last_event.get(key, 0.0)
         ttl = settings.WS_FRESH_TTL_MIN * 60.0
         return (now - last) <= ttl
 
-    def get_cached(self, symbol: str, limit: int = 200):
+    def get_cached(self, symbol: str, limit: int = 200,
+                   interval: str = "1h"):
         """Return a candle DataFrame from the live cache, or None.
 
         None means "use REST" - every caller must degrade gracefully.
         """
         from src.core.data_fetcher import DataFetcher  # lazy: avoid circulars
-        if not self.fresh(symbol, min_bars=min(limit, 60)):
+        if not self.fresh(symbol, min_bars=min(limit, 60), interval=interval):
             return None
         with self._lock:
-            bars = list(self._bars.get(symbol) or [])
+            bars = list(self._bars.get(self._key(symbol, interval)) or [])
         if len(bars) < limit:
             return None
         try:
@@ -302,12 +333,18 @@ class WSKlineFeed:
         """Dashboard-facing health snapshot."""
         now = time.monotonic()
         with self._lock:
+            intervals = {}
+            for key in self._bars:
+                iv = key.rpartition("|")[2]
+                intervals[iv] = intervals.get(iv, 0) + 1
             return {
                 "enabled": bool(settings.USE_WS_FEED),
                 "started": self._started,
                 "connected": self._connected,
                 "universe": len(self._universe),
+                "intervals": self._intervals(),
                 "cached_symbols": len(self._bars),
+                "cached_per_interval": intervals,
                 "needs_reseed": self._needs_reseed,
                 "last_msg_age_s": round(now - self._last_msg_ts, 1) if self._last_msg_ts else None,
                 "messages": self._msg_count,
