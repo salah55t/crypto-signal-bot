@@ -118,6 +118,18 @@ services:
       - key: SKIP_ORDER_BOOK
         value: "false"
 
+      # === v5.3 WebSocket candle feed + API pressure relief ===
+      # WS streams bypass the REST weight budget: live 1h candles for the
+      # whole universe with ~0 REST klines weight (the analyzer + bottom
+      # scanner used to refetch the same 150 symbols twice per cycle)
+      - key: USE_WS_FEED
+        value: "true"
+      - key: WS_FRESH_TTL_MIN
+        value: "15"
+      # Cache the dynamic symbol list for 1h (was: weight-80 refetch every cycle)
+      - key: SYMBOL_REFRESH_MIN
+        value: "60"
+
       # === Reinforcement Learning (OPTIONAL, ADVANCED) ===
       # Requires heavy deps (~500MB PyTorch). NOT recommended on Free Tier (512MB RAM)
       # To enable:

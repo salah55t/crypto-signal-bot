@@ -131,6 +131,7 @@ async def root():
 async def health():
     # v5.2: surface rate-limit state so "bot silent" is explainable
     # (shared-IP cooldown vs real outage) straight from the dashboard.
+    # v5.3: + WebSocket feed status + pressure streak.
     try:
         from src.core.rate_limiter import rate_limiter
         rate_state = {
@@ -138,9 +139,15 @@ async def health():
             "cooldown_seconds_left": round(rate_limiter.cooldown_remaining(), 1),
             "used_weight_1m": int(rate_limiter.used_weight()),
             "budget_per_min": int(rate_limiter.budget),
+            "pressure_streak": rate_limiter.pressure_streak(),
         }
     except Exception:
         rate_state = {"error": "unavailable"}
+    try:
+        from src.core.ws_feed import ws_feed
+        ws_state = ws_feed.status()
+    except Exception:
+        ws_state = {"error": "unavailable"}
     return {
         "status": "ok",
         "service": "crypto-signal-bot",
@@ -148,6 +155,7 @@ async def health():
         "timestamp": now_utc().isoformat(),
         "mode": settings.RUN_MODE,
         "rate_limit": rate_state,
+        "ws_feed": ws_state,
     }
 
 
@@ -564,6 +572,15 @@ async def startup_event():
         log.info("[green]Database initialized successfully[/]")
     except Exception as e:
         log.error(f"Database initialization failed: {e}")
+
+    # v5.3: WebSocket kline feed (zero REST weight for 1h candles)
+    try:
+        from src.core.ws_feed import ws_feed
+        from src.analysis.analyzer import analyzer
+        ws_feed.update_universe(analyzer.symbols)
+        ws_feed.start()
+    except Exception as e:
+        log.warning(f"[yellow]WS feed startup skipped:[/] {e}")
 
     # File watcher (always on)
     asyncio.create_task(watch_recommendations_file())

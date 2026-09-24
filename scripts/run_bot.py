@@ -40,6 +40,15 @@ def main():
         # Single run
         run_analysis_cycle()
     else:
+        # v5.3: live WS candle feed (zero REST weight for 1h klines)
+        try:
+            from src.core.ws_feed import ws_feed
+            ws_feed.update_universe(
+                __import__("src.analysis.analyzer", fromlist=["analyzer"]).analyzer.symbols
+            )
+            ws_feed.start()
+        except Exception as e:
+            log.warning(f"[yellow]WS feed startup skipped:[/] {e}")
         # Initial run
         run_analysis_cycle()
         # Then schedule recurring: full cycle + fast watcher

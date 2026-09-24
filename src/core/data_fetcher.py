@@ -50,11 +50,38 @@ class DataFetcher:
     @retry_on_failure
     def get_candles(symbol: str, interval: str = "1h",
                     limit: int = 200) -> pd.DataFrame:
-        """Get historical candles for a symbol as a DataFrame."""
+        """Get historical candles for a symbol as a DataFrame.
+
+        v5.3: for 1h candles the live WebSocket cache is served first (zero
+        REST weight - Binance WS streams bypass the request-weight budget).
+        Falls back to REST when the feed is disabled/stale/short, and any
+        REST fetch re-ingests into the cache so the next cycle reads free.
+        """
         if interval not in DataFetcher.INTERVALS:
             raise ValueError(f"Invalid interval '{interval}'. Valid: {DataFetcher.INTERVALS}")
+        if interval == "1h":
+            try:
+                from src.core.ws_feed import ws_feed
+                cached = ws_feed.get_cached(symbol, limit)
+                if cached is not None:
+                    return cached
+            except Exception:
+                pass  # cache must never break the REST path
+        return DataFetcher._get_candles_rest(symbol, interval, limit)
+
+    @staticmethod
+    def _get_candles_rest(symbol: str, interval: str = "1h",
+                          limit: int = 200) -> pd.DataFrame:
+        """REST fetch + cache ingest (bypasses the WS read - used by reseeds)."""
         raw = binance_client.get_klines(symbol, interval, limit=limit)
-        return DataFetcher.klines_to_df(raw)
+        df = DataFetcher.klines_to_df(raw)
+        if interval == "1h" and df is not None and not df.empty:
+            try:
+                from src.core.ws_feed import ws_feed
+                ws_feed.ingest(symbol, df)
+            except Exception:
+                pass
+        return df
 
     @staticmethod
     @retry_on_failure

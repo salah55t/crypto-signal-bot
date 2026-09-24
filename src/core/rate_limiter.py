@@ -30,9 +30,22 @@ class WeightedRateLimiter:
     - `trigger_cooldown(seconds)` pauses ALL callers (used on 429/418).
     - `note_server_weight(used)` applies a defensive cooldown when the
       server reports the shared-IP budget is nearly exhausted.
+
+    v5.3: ESCALATING pressure response. On a shared Render IP the neighbors
+    (not us) keep `X-MBX-USED-WEIGHT-1M` hot for long stretches. The old
+    fixed 10s/30s cooldowns created a poke-loop: every response re-triggered
+    the same short cooldown the moment it expired, so the bot crawled and
+    the log spammed one WARNING per request. Now consecutive pressure hits
+    double the cooldown (10 -> 20 -> 40 -> ... cap 300s) and the warning is
+    logged only on transition or meaningful escalation.
     """
 
     WINDOW_SECONDS = 60.0
+    # multiplier applied to the base cooldown after N consecutive hits
+    ESCALATION = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+    PRESSURE_CAP_S = 300.0      # max cooldown from *header pressure* (not 418)
+    PRESSURE_RESET_S = 600.0    # quiet period that resets the streak
+    LOW_WEIGHT_PCT = 0.80       # header below this cools the streak down
 
     def __init__(self, budget_per_min: float = 4500.0, hard_ceiling: int = 6000):
         if budget_per_min <= 0:
@@ -42,6 +55,8 @@ class WeightedRateLimiter:
         self._events = deque()  # (monotonic_ts, weight)
         self._lock = threading.Lock()
         self._cooldown_until = 0.0  # monotonic ts
+        self._pressure_streak = 0
+        self._last_pressure_ts = 0.0
 
     # ------------------------------------------------------------------
     def _prune(self, now: float) -> float:
@@ -96,16 +111,47 @@ class WeightedRateLimiter:
 
         v5.2: cap raised 120s -> 3600s so an IP auto-ban (418) can back off
         hard. Regular 429 paths still pass <= 120s from the client side.
+        v5.3: log only on transition into cooldown or a meaningful escalation
+        (>= 30s added) - repeated 10/20s re-arms stay silent.
         """
         seconds = max(1.0, min(float(seconds), 3600.0))
-        until = time.monotonic() + seconds
+        now = time.monotonic()
         with self._lock:
+            was_in_cooldown = now < self._cooldown_until
+            prev_remaining = max(0.0, self._cooldown_until - now) if was_in_cooldown else 0.0
+            until = now + seconds
+            extended = False
             if until > self._cooldown_until:
                 self._cooldown_until = until
-        log.warning(
-            f"[yellow]Rate limiter[/] global cooldown {seconds:.0f}s "
-            f"(server 429/418 or shared-IP pressure)"
-        )
+                extended = True
+        added = seconds - prev_remaining
+        if extended and (not was_in_cooldown or added >= 30.0):
+            log.warning(
+                f"[yellow]Rate limiter[/] global cooldown {seconds:.0f}s "
+                f"(server 429/418 or shared-IP pressure)"
+            )
+
+    def pressure_streak(self) -> int:
+        """Consecutive shared-IP pressure hits (for /api/health visibility)."""
+        with self._lock:
+            return self._pressure_streak
+
+    def _register_pressure(self, base_seconds: float) -> float:
+        """Record a pressure hit and return the ESCALATED cooldown seconds."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_pressure_ts > self.PRESSURE_RESET_S:
+                self._pressure_streak = 0
+            self._pressure_streak += 1
+            self._last_pressure_ts = now
+            idx = min(self._pressure_streak - 1, len(self.ESCALATION) - 1)
+            mult = self.ESCALATION[idx]
+        return min(base_seconds * mult, self.PRESSURE_CAP_S)
+
+    def _register_quiet(self) -> None:
+        """A healthy header - cool the escalation streak down."""
+        with self._lock:
+            self._pressure_streak = 0
 
     def in_cooldown(self) -> bool:
         return time.monotonic() < self._cooldown_until
@@ -120,6 +166,10 @@ class WeightedRateLimiter:
         Feed back the `X-MBX-USED-WEIGHT-1M` header. If the SHARED IP is
         already near Binance's ceiling, pause even if our own accounting
         is small (neighbors on the same egress IP count too).
+
+        v5.3: consecutive hits ESCALATE (base x2 each time, cap 300s) so a
+        hot neighbor stops being poked every few seconds; a healthy header
+        (< 80% of ceiling) resets the escalation.
         """
         try:
             used = int(used)
@@ -128,9 +178,11 @@ class WeightedRateLimiter:
         if used <= 0:
             return
         if used >= int(self.hard_ceiling * 0.95):
-            self.trigger_cooldown(30.0)
+            self.trigger_cooldown(self._register_pressure(30.0))
         elif used >= int(self.hard_ceiling * 0.85):
-            self.trigger_cooldown(10.0)
+            self.trigger_cooldown(self._register_pressure(10.0))
+        elif used < int(self.hard_ceiling * self.LOW_WEIGHT_PCT):
+            self._register_quiet()
 
     # ------------------------------------------------------------------
     def used_weight(self) -> float:

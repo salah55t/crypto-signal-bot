@@ -33,6 +33,20 @@ _ENDPOINT_WEIGHTS = {
 
 def _endpoint_weight(path: str, params: Dict[str, Any]) -> float:
     """Best-effort request weight for the endpoint + params."""
+    if path == "/api/v3/klines":
+        # weight scales with the limit: [1,100]->1, (100,500]->2,
+        # (500,1000]->5, (1000,1500]->10 (Binance spot docs)
+        try:
+            lim = int(params.get("limit", 500))
+        except (TypeError, ValueError):
+            lim = 500
+        if lim <= 100:
+            return 1
+        if lim <= 500:
+            return 2
+        if lim <= 1000:
+            return 5
+        return 10
     if path == "/api/v3/depth":
         try:
             lim = int(params.get("limit", 20))

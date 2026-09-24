@@ -141,6 +141,23 @@ class Settings:
     # Order book snapshots are cached this many minutes (weight 5 each)
     ORDER_BOOK_TTL_MIN: int = int(os.getenv("ORDER_BOOK_TTL_MIN", "30"))
 
+    # --- v5.3 WebSocket candle feed (zero REST weight for klines) ---
+    # Binance WS streams bypass the REST request-weight budget entirely.
+    # One combined connection keeps a live 1h candle cache for the universe,
+    # seeded by the first REST cycle and updated incrementally. Every consumer
+    # (analyzer, bottom scanner, market map, backtests via REST) reads the
+    # cache first and falls back to REST when it is disabled/stale.
+    USE_WS_FEED: bool = os.getenv("USE_WS_FEED", "true").lower() == "true"
+    # Market-data WS endpoint (data-stream.binance.vision = public data twin
+    # of data-api.binance.vision; stream.binance.com also works)
+    WS_ENDPOINT: str = os.getenv("WS_ENDPOINT", "wss://data-stream.binance.vision/stream")
+    # Cache older than this many minutes is considered stale -> REST fallback
+    # (15 min << 1 bar, so a closed 1h bar can never be silently missing)
+    WS_FRESH_TTL_MIN: float = float(os.getenv("WS_FRESH_TTL_MIN", "15"))
+    # Dynamic symbol list refresh: /ticker/24hr costs weight 80 - cache it
+    # this many minutes instead of refetching every cycle (was every cycle)
+    SYMBOL_REFRESH_MIN: int = int(os.getenv("SYMBOL_REFRESH_MIN", "60"))
+
     # --- Position hygiene ---
     # Skip a recommendation if the same symbol already has an open position
     # (prevents duplicate entries on consecutive cycles)

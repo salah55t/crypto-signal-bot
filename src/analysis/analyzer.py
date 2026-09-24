@@ -3,6 +3,7 @@ Main Analyzer - orchestrates data fetching + multi-strategy analysis
 across all configured symbols.
 """
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,9 +23,11 @@ class MarketAnalyzer:
 
     def __init__(self):
         self.excluded = settings.load_excluded()
+        self._symbols_ts = None  # ts of last dynamic symbol-list refresh
         if settings.USE_ALL_USDT_PAIRS:
             # Fetch all USDT pairs dynamically from Binance
             self.symbols = self._fetch_all_usdt_pairs()
+            self._symbols_ts = now_utc()
             log.info(
                 f"[cyan]MarketAnalyzer[/] DYNAMIC MODE - monitoring "
                 f"{len(self.symbols)} USDT pairs from Binance "
@@ -63,11 +66,28 @@ class MarketAnalyzer:
             # Fallback to static list
             return [s for s in settings.load_coins() if s not in self.excluded]
 
-    def refresh_symbols(self):
-        """Re-fetch the symbol list (useful when USE_ALL_USDT_PAIRS=True)."""
-        if settings.USE_ALL_USDT_PAIRS:
-            self.symbols = self._fetch_all_usdt_pairs()
-            log.info(f"[cyan]Symbols refreshed[/] - {len(self.symbols)} pairs")
+    def refresh_symbols(self, force: bool = False):
+        """Re-fetch the symbol list (dynamic mode only).
+
+        v5.3: cached for SYMBOL_REFRESH_MIN minutes. The old behaviour
+        refetched /ticker/24hr (weight 80!) every cycle AND again from
+        bottom_scanner.scan() - pure waste when symbols rarely churn.
+        """
+        if not settings.USE_ALL_USDT_PAIRS:
+            return
+        if not force and self._symbols_ts is not None:
+            age = now_utc() - self._symbols_ts
+            if age < timedelta(minutes=max(1, settings.SYMBOL_REFRESH_MIN)):
+                return
+        self.symbols = self._fetch_all_usdt_pairs()
+        self._symbols_ts = now_utc()
+        log.info(f"[cyan]Symbols refreshed[/] - {len(self.symbols)} pairs")
+        # v5.3: keep the WS candle feed subscribed to the current universe
+        try:
+            from src.core.ws_feed import ws_feed
+            ws_feed.update_universe(self.symbols)
+        except Exception:
+            pass
 
     def analyze_one(self, symbol: str) -> Dict:
         """Fetch data and run analysis for one symbol."""

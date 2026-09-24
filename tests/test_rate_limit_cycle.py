@@ -111,3 +111,74 @@ def test_health_exposes_rate_limit_state():
     assert "in_cooldown" in rl
     assert "cooldown_seconds_left" in rl
     assert "used_weight_1m" in rl
+
+
+# ---------- v5.3: escalating shared-IP pressure ----------
+
+def test_pressure_escalates_on_consecutive_hits(monkeypatch):
+    lim = WeightedRateLimiter(budget_per_min=100)
+    monkeypatch.setattr(lim, "_cooldown_until", 0.0)
+    seen = []
+    for _ in range(5):  # consecutive >=95% headers (neighbors hammering)
+        lim.note_server_weight(5800)
+        seen.append(lim.cooldown_remaining())
+    # 30 -> 60 -> 120 -> 240 -> 300 (cap); never a fixed 30s poke-loop
+    assert seen[0] <= 31
+    assert seen[1] <= 61
+    assert seen[2] <= 121
+    assert seen[3] <= 241
+    assert seen[4] <= 301
+    assert seen[-1] >= 295                 # capped at PRESSURE_CAP_S
+    assert len(set(seen)) >= 3             # genuinely escalating
+    assert lim.pressure_streak() == 5
+
+
+def test_pressure_85_band_escalates_from_10s(monkeypatch):
+    lim = WeightedRateLimiter(budget_per_min=100)
+    monkeypatch.setattr(lim, "_cooldown_until", 0.0)
+    lim.note_server_weight(5300)           # 85-95% band -> base 10s
+    assert 9 <= lim.cooldown_remaining() <= 11
+    lim.note_server_weight(5300)
+    assert 19 <= lim.cooldown_remaining() <= 21
+
+
+def test_pressure_streak_resets_on_healthy_header(monkeypatch):
+    lim = WeightedRateLimiter(budget_per_min=100)
+    monkeypatch.setattr(lim, "_cooldown_until", 0.0)
+    lim.note_server_weight(5800)
+    lim.note_server_weight(5800)
+    assert lim.pressure_streak() == 2
+    lim.note_server_weight(1000)           # IP cooled down (< 80%)
+    assert lim.pressure_streak() == 0
+    # a NEW episode starts from the BASE again, not the escalated level
+    # (cooldown extension semantics mean the old window may still run, but
+    # the next REGISTERED cooldown is the base 30s)
+    assert lim._register_pressure(30.0) <= 31.0
+
+
+def test_pressure_cooldown_capped_below_418_ban(monkeypatch):
+    lim = WeightedRateLimiter(budget_per_min=100)
+    monkeypatch.setattr(lim, "_cooldown_until", 0.0)
+    for _ in range(20):                    # extreme sustained pressure
+        lim.note_server_weight(5999)
+    assert lim.cooldown_remaining() <= 301  # header pressure != 418 hard ban
+
+
+def test_health_exposes_ws_feed_state():
+    from fastapi.testclient import TestClient
+    from src.web.app import app
+    client = TestClient(app)
+    body = client.get("/api/health").json()
+    ws = body.get("ws_feed") or {}
+    assert "enabled" in ws
+    assert "connected" in ws
+    assert "cached_symbols" in ws
+
+
+def test_klines_weight_scales_with_limit():
+    from src.core.binance_client import _endpoint_weight
+    assert _endpoint_weight("/api/v3/klines", {"limit": 100}) == 1
+    assert _endpoint_weight("/api/v3/klines", {"limit": 200}) == 2
+    assert _endpoint_weight("/api/v3/klines", {"limit": 1000}) == 5
+    assert _endpoint_weight("/api/v3/klines", {"limit": 1500}) == 10
+    assert _endpoint_weight("/api/v3/klines", {}) == 2  # default ~500
