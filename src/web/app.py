@@ -179,6 +179,22 @@ async def get_pending_entries():
     ]
 
 
+@app.get("/api/market-map")
+async def get_market_map(refresh: bool = False):
+    """v5.2: leader/follower correlation groups + leader trends.
+
+    Serves the cached map (recomputed at most every MARKET_MAP_REFRESH_HOURS).
+    Pass ?refresh=true to force a rebuild (blocking, ~1 API call per symbol).
+    """
+    from src.analysis.market_map import market_map
+    try:
+        market_map.get_map(force=refresh)  # rebuild now if refresh=True
+        return market_map.grouped_view()
+    except Exception as e:
+        log.error(f"Market map error: {e}")
+        return {"error": str(e), "groups": {}, "leaders": {}}
+
+
 @app.get("/api/all-analyses")
 async def get_all_analyses():
     """

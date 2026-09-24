@@ -146,6 +146,16 @@ class MarketAnalyzer:
             f"symbols analyzed in {time.time()-start:.1f}s"
         )
 
+        # v5.2 Market Map: classify followers to leaders (BTC/ETH/SOL/XRP) and
+        # apply the leader's trend BEFORE filtering:
+        #   bearish leader -> confidence penalty (admission too - may demote out)
+        #   bullish leader -> rank-only boost (admission stays merit-based)
+        try:
+            from src.analysis.market_map import market_map
+            results = market_map.apply_regime(results)
+        except Exception as e:
+            log.warning(f"[yellow]Market map step skipped: {e}[/]")
+
         # Filter: bullish only, sort by confidence
         filtered = scorer.filter_signals(
             results,

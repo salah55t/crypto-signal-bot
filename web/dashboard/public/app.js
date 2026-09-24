@@ -566,6 +566,71 @@ async function fetchClosedTrades() {
   }
 }
 
+// v5.2: leader/follower market map (BTC/ETH/SOL/XRP groups)
+const TREND_BADGE = {
+  bullish: ['🟢 صاعد', 'var(--green)'],
+  bearish: ['🔴 هابط', 'var(--red)'],
+  neutral: ['⚪ محايد', 'var(--text-muted)'],
+};
+
+async function fetchMarketMap() {
+  try {
+    const r = await fetch(`${API}/market-map`);
+    renderMarketMap(await r.json());
+  } catch (e) {
+    console.error('Market map fetch error:', e);
+  }
+}
+
+function renderMarketMap(data) {
+  const $map = document.getElementById('marketMap');
+  if (!data || data.error || !data.groups) {
+    $map.innerHTML = '<div class="empty glass">لا توجد بيانات تصنيف بعد.</div>';
+    return;
+  }
+  const leaders = data.leaders || {};
+  const groups = data.groups || {};
+  const order = Object.keys(leaders).filter(ld => groups[ld]);
+  if (groups['independent']) order.push('independent');
+  Object.keys(groups).filter(g => !order.includes(g)).forEach(g => order.push(g));
+  if (!order.length) {
+    $map.innerHTML = '<div class="empty glass">لا توجد بيانات تصنيف بعد.</div>';
+    return;
+  }
+  const upd = data.updated_at ? new Date(data.updated_at).toLocaleString('ar') : '';
+  document.getElementById('marketMapUpdated').textContent =
+    upd ? `آخر تحديث: ${upd} · تُحدّث كل 6 ساعات` : '';
+
+  $map.innerHTML = order.map(g => {
+    const isLeader = g !== 'independent';
+    const meta = leaders[g] || {};
+    const [label, color] = isLeader
+      ? (TREND_BADGE[meta.trend] || TREND_BADGE.neutral)
+      : ['دون قائد', 'var(--text-muted)'];
+    const followers = groups[g] || [];
+    const shown = followers.slice(0, 12);
+    const rows = shown.map(f => `
+      <div class="analysis-row">
+        <span class="a-symbol">${escapeHtml(f.symbol)}</span>
+        <span class="a-direction neutral">corr ${f.corr != null ? (f.corr * 100).toFixed(0) : '—'}%</span>
+        <span class="a-score">beta ${f.beta != null ? Number(f.beta).toFixed(2) : '—'}</span>
+      </div>`).join('');
+    const more = followers.length > shown.length
+      ? `<div class="empty" style="padding:6px;">+${followers.length - shown.length} عملة أخرى</div>` : '';
+    const chg = isLeader && meta.chg_24h_pct != null
+      ? ` · 24h ${meta.chg_24h_pct > 0 ? '+' : ''}${meta.chg_24h_pct}%` : '';
+    return `
+      <div class="glass" style="margin-bottom:12px; padding:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <b>${escapeHtml(g === 'independent' ? 'عملات مستقلة' : g)}</b>
+          <span style="color:${color}; font-weight:600;">${label}${chg}</span>
+        </div>
+        ${isLeader ? `<div style="color:var(--text-muted); font-size:0.85em; margin-bottom:6px;">${followers.length} عملة تتبع ${escapeHtml(g)} — إذا هبط ${escapeHtml(g)} فغالباً يهبطون معه</div>` : ''}
+        ${rows}${more}
+      </div>`;
+  }).join('');
+}
+
 async function fetchAll() {
   await Promise.all([
     fetchRecommendations(),
@@ -574,6 +639,7 @@ async function fetchAll() {
     fetchClosedTrades(),
     fetchBottomCandidates(),
     fetchStats(),
+    fetchMarketMap(),
   ]);
 }
 

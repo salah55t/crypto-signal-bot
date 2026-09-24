@@ -67,6 +67,7 @@
       <button class="tab" data-tab="bottoms">🔍 القاع</button>
       <button class="tab" data-tab="all-analyses">📊 التحليلات</button>
       <button class="tab" data-tab="positions">💼 الصفقات</button>
+      <button class="tab" data-tab="market-map">🧭 مجموعات السوق</button>
       <button class="tab" data-tab="closed">📜 السجل</button>
       <button class="tab" data-tab="stats">📈 الإحصائيات</button>
     </div>
@@ -117,6 +118,17 @@
     <section class="tab-content" id="tab-positions">
       <div class="positions-list" id="positionsList">
         <div class="empty glass">لا توجد صفقات مفتوحة.</div>
+      </div>
+    </section>
+
+    <!-- Tab: Market groups (v5.2 leader/follower classification) -->
+    <section class="tab-content" id="tab-market-map">
+      <div class="section-title">
+        <h2>🧭 مجموعات السوق — من يتبع من؟</h2>
+        <span id="marketMapUpdated" style="color: var(--text-muted); font-size: 0.85em;"></span>
+      </div>
+      <div class="positions-list" id="marketMap">
+        <div class="empty glass">جاري التحميل…</div>
       </div>
     </section>
 

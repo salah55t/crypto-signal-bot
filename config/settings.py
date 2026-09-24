@@ -178,6 +178,24 @@ class Settings:
     # Set to true for faster analysis of many symbols (loses liquidity strategy signal)
     SKIP_ORDER_BOOK: bool = os.getenv("SKIP_ORDER_BOOK", "false").lower() == "true"
 
+    # --- Market Map: leader/follower correlation classification (v5.2) ---
+    # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).
+    # We classify each symbol to its highest-correlated leader and use the
+    # leader's trend as a regime filter: follower of a bearish leader gets a
+    # confidence penalty (can demote out), bullish leader gets a rank-only
+    # boost (same v4 philosophy as other boosts - merit gates admission).
+    MARKET_MAP_LEADERS: list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+    # Assign to a leader only if Pearson corr(returns) >= this; else independent
+    MARKET_MAP_CORR_THRESHOLD: float = float(os.getenv("MARKET_MAP_CORR_THRESHOLD", "0.55"))
+    # Correlation window: hours of 1h closes used for returns (168 = 7 days)
+    MARKET_MAP_LOOKBACK_HOURS: int = int(os.getenv("MARKET_MAP_LOOKBACK_HOURS", "168"))
+    # How often the map is recomputed (cached in data/market_map.json)
+    MARKET_MAP_REFRESH_HOURS: float = float(os.getenv("MARKET_MAP_REFRESH_HOURS", "6"))
+    # Regime action: bearish leader -> confidence -= corr * PENALTY (admission too)
+    LEADER_BEARISH_CONF_PENALTY: float = float(os.getenv("LEADER_BEARISH_CONF_PENALTY", "20"))
+    # Regime action: bullish leader -> confidence += corr * BOOST (rank-only)
+    LEADER_BULLISH_CONF_BOOST: float = float(os.getenv("LEADER_BULLISH_CONF_BOOST", "8"))
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "data/logs/bot.log")
