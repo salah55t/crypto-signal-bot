@@ -92,8 +92,12 @@ class WeightedRateLimiter:
 
     # ------------------------------------------------------------------
     def trigger_cooldown(self, seconds: float) -> None:
-        """Pause all outbound requests for `seconds` (429 backoff)."""
-        seconds = max(1.0, min(float(seconds), 120.0))
+        """Pause all outbound requests for `seconds` (429/418 backoff).
+
+        v5.2: cap raised 120s -> 3600s so an IP auto-ban (418) can back off
+        hard. Regular 429 paths still pass <= 120s from the client side.
+        """
+        seconds = max(1.0, min(float(seconds), 3600.0))
         until = time.monotonic() + seconds
         with self._lock:
             if until > self._cooldown_until:
@@ -105,6 +109,10 @@ class WeightedRateLimiter:
 
     def in_cooldown(self) -> bool:
         return time.monotonic() < self._cooldown_until
+
+    def cooldown_remaining(self) -> float:
+        """Seconds left in the current cooldown (0.0 if none)."""
+        return max(0.0, self._cooldown_until - time.monotonic())
 
     # ------------------------------------------------------------------
     def note_server_weight(self, used: int) -> None:

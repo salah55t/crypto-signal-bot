@@ -129,12 +129,25 @@ async def root():
 
 @app.get("/api/health")
 async def health():
+    # v5.2: surface rate-limit state so "bot silent" is explainable
+    # (shared-IP cooldown vs real outage) straight from the dashboard.
+    try:
+        from src.core.rate_limiter import rate_limiter
+        rate_state = {
+            "in_cooldown": rate_limiter.in_cooldown(),
+            "cooldown_seconds_left": round(rate_limiter.cooldown_remaining(), 1),
+            "used_weight_1m": int(rate_limiter.used_weight()),
+            "budget_per_min": int(rate_limiter.budget),
+        }
+    except Exception:
+        rate_state = {"error": "unavailable"}
     return {
         "status": "ok",
         "service": "crypto-signal-bot",
         "version": "1.0.0",
         "timestamp": now_utc().isoformat(),
         "mode": settings.RUN_MODE,
+        "rate_limit": rate_state,
     }
 
 

@@ -353,15 +353,58 @@ def open_new_positions(recommendations: List[Dict]) -> int:
 # ------------------------------------------------------------------
 # FULL CYCLE
 # ------------------------------------------------------------------
+def rate_limit_gate() -> bool:
+    """True when this cycle should SKIP because of active rate limiting.
+
+    Distinguishes "rate-limited (transient - next cron tick retries)" from
+    "network down" so the log stops showing a misleading network error when
+    the limiter itself is protecting the shared IP (429/418 backoff).
+    """
+    from src.core.rate_limiter import rate_limiter
+    remaining = rate_limiter.cooldown_remaining()
+    if remaining > 0:
+        log.warning(
+            f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left) - "
+            f"skipping this cycle (429/418 or shared-IP pressure); "
+            f"next cron tick retries automatically[/]"
+        )
+        return True
+    return False
+
+
+def _binance_reachable(retries: int = 2, grace: float = 5.0) -> bool:
+    """Ping with a short grace retry for transient network blips."""
+    for attempt in range(1, retries + 1):
+        if binance_client.ping():
+            return True
+        if attempt < retries:
+            log.warning(f"Binance ping failed (attempt {attempt}) - retrying in {grace:.0f}s")
+            time.sleep(grace)
+    return False
+
+
 def run_analysis_cycle():
     """One full bot cycle: manage -> analyze -> manage(signals) -> notify -> open."""
     log.info("=" * 60)
     log.info("[bold cyan]STARTING ANALYSIS CYCLE (v5)[/]")
     log.info("=" * 60)
 
-    if not binance_client.ping():
+    # ---- STEP 0: rate-limit gate (429/418 or shared-IP pressure) ----
+    if rate_limit_gate():
+        return
+
+    if not _binance_reachable():
         log.error("[red]Cannot reach Binance API[/] - check network or VPN")
         return
+
+    # ---- STEP 0.5: pre-warm the Market Map OUTSIDE the analysis burst ----
+    # Its ~300 request-weight then ages out of the sliding 60s window while
+    # the per-symbol analysis ramps up, instead of stacking right after it.
+    try:
+        from src.analysis.market_map import market_map
+        market_map.get_map()
+    except Exception as e:
+        log.debug(f"Market map pre-warm skipped: {e}")
 
     cycle_start = time.time()
 

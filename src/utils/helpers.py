@@ -101,7 +101,17 @@ def retry_on_failure(func, retries: int = 3, delay: float = 1.0, exceptions=(Exc
             except RateLimitError as e:
                 # Cooldown is already active inside the limiter; wait it out.
                 last_exc = e
-                backoff = max(15.0, rate_limiter._cooldown_until - time.monotonic() + 1.0)
+                cooldown_left = rate_limiter.cooldown_remaining()
+                if cooldown_left > 130.0:
+                    # v5.2: hard backoff (418 IP ban >= 15 min) - sleeping 45s
+                    # per fetch would just limp the whole cycle for nothing.
+                    # Abort fast; the next cron tick retries when the ban lifts.
+                    log.warning(
+                        f"Rate-limited on {getattr(func, '__name__', 'call')} "
+                        f"with {cooldown_left:.0f}s ban left - aborting fast"
+                    )
+                    raise
+                backoff = max(15.0, cooldown_left + 1.0)
                 log.warning(
                     f"Rate-limited on {getattr(func, '__name__', 'call')} "
                     f"(attempt {attempt + 1}/{retries}) - backing off {backoff:.0f}s"

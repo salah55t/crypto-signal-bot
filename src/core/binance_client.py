@@ -127,7 +127,14 @@ class BinanceClient:
                     retry_after = float(retry_after)
                 except ValueError:
                     retry_after = 30.0
-                rate_limiter.trigger_cooldown(min(retry_after + 2, 120))
+                if response.status_code == 418:
+                    # v5.2: IP auto-ban - Retry-After can be minutes..hours and
+                    # every request sent during the ban can EXTEND it. Back off
+                    # hard (>= 15 min) instead of poking it every cycle.
+                    cooldown = min(max(retry_after, 900.0), 3600.0)
+                else:
+                    cooldown = min(retry_after + 2, 120.0)
+                rate_limiter.trigger_cooldown(cooldown)
                 raise RateLimitError(
                     f"Binance {response.status_code}: {response.text[:120]}"
                 )
