@@ -925,9 +925,25 @@ function connectWS() {
 // ============================================================
 // Init
 // ============================================================
+// v5.6: fill the terminology info banners with the live admission knobs
+async function loadConfigNotes() {
+  try {
+    const cfg = await fetch(`${API}/config`).then(r => r.json());
+    const set = (id, txt) => {
+      const el = document.getElementById(id);
+      if (el && txt !== undefined && txt !== null) el.textContent = txt;
+    };
+    set('bottomGateScore', cfg.bottom_strong_score);
+    set('bottomGateMax', cfg.bottom_max_per_cycle);
+    set('posAmount', `$${cfg.trade_amount_usd}`);
+  } catch (e) {
+    console.warn('config notes unavailable:', e);
+  }
+}
+
 async function init() {
   // Initial load: only fetch recommendations + stats (active tab)
-  await Promise.all([fetchRecommendations(), fetchPositions()]);
+  await Promise.all([fetchRecommendations(), fetchPositions(), loadConfigNotes()]);
   connectWS();
   // Reduced polling: positions every 60s (was 30s)
   setInterval(() => { if (activeTab === 'positions') fetchPositions(); }, 60000);

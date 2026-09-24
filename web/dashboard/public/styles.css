@@ -543,6 +543,19 @@ main {
   border: 1px dashed var(--border);
 }
 
+/* v5.6: terminology help banners (توصية vs صفقة مفتوحة) */
+.info-note {
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-right: 3px solid var(--cyan);
+  background: rgba(0, 229, 255, 0.04);
+}
+.info-note b { color: var(--cyan); }
+
 /* Position cards */
 .positions-list {
   display: flex;

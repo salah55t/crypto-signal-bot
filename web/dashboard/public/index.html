@@ -74,6 +74,14 @@
 
     <!-- Tab 1: Recommendations -->
     <section class="tab-content active" id="tab-recommendations">
+      <!-- v5.6: terminology help -->
+      <div class="glass info-note">
+        <b>ما هي "التوصية"؟</b>
+        نتيجة تحليل ناجح لعملة تجاوزت كل الفلاتر (ثقة ≥ 68%، نسبة ربح/خسارة ≥ 1.5، توافق الطبقات، نظام السوق).
+        التوصية نصيحة دخول بسعر ووقف خسارة وهدف — <b>قد لا تتحول إلى صفقة</b>
+        إذا كانت بوابات المخاطر مغلقة (5 صفقات مفتوحة، خسارة يومية، توقف بعد 3 خسائر، سوق هابط بقيادة BTC،
+        أو السعر بعيد عن منطقة الدخول فيُسلّح أمر معلّق بدلاً من الشراء الفوري).
+      </div>
       <div class="cards-grid" id="recommendations">
         <div class="empty glass">في انتظار التوصيات… اضغط "تحليل الآن" لبدء دورة فورية.</div>
       </div>
@@ -81,6 +89,14 @@
 
     <!-- Tab 2: Bottom candidates -->
     <section class="tab-content" id="tab-bottoms">
+      <!-- v5.6: bottom-boost explanation -->
+      <div class="glass info-note">
+        <b>كيف تدخل عملة القاع إلى التوصيات؟</b>
+        يجب أن تجمع نقاط ارتداد ≥ <span id="bottomGateScore">—</span>
+        + إغلاق شمعة صاعدة (لا سكين ساقطة) + نسبة ربح/خسارة ≥ 1.5، وبحد أقصى
+        <span id="bottomGateMax">—</span> عملات لكل دورة تنافس بقية التوصيات.
+        عند تحقق ذلك تظهر في تبويب "التوصيات" ويفتح البوت عليها صفقة مثل أي توصية.
+      </div>
       <div class="filter-bar glass">
         <button id="scanBottomsBtn" class="btn-purple">
           <span class="btn-icon">🔍</span> فحص القاع الآن
@@ -116,6 +132,14 @@
 
     <!-- Tab 4: Positions -->
     <section class="tab-content" id="tab-positions">
+      <!-- v5.6: terminology help -->
+      <div class="glass info-note">
+        <b>ما هي "الصفقة المفتوحة"؟</b>
+        توصية فتح البوت عليها مركزاً فعلياً (ورقي أو حقيقي) بحجم ثابت
+        (<span id="posAmount">—</span>)، ويديره تلقائياً حتى الإغلاق:
+        وقف خسارة، هدف أول (يؤمّن 50%)، هدف ثانٍ، وقف متتبع، وإغلاق فوري عند إشارة عكسية.
+        التوصية = نصيحة، الصفقة = تنفيذ مُدار.
+      </div>
       <div class="positions-list" id="positionsList">
         <div class="empty glass">لا توجد صفقات مفتوحة.</div>
       </div>

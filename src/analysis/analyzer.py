@@ -18,6 +18,58 @@ from src.utils.helpers import save_json, now_utc, to_json_safe
 RECOMMENDATIONS_FILE = Path("data/recommendations.json")
 
 
+def build_bottom_rec(c: Dict) -> Dict:
+    """v5.6: convert a bottom-scanner candidate into a recommendation dict.
+
+    Confidence uses the BOUNCE scale (40 + score/2, capped at
+    BOTTOM_CONF_CAP) instead of the old 45 + score/3: with MIN_CONFIDENCE
+    raised to 68, the old mapping silently required score >= 69 and killed
+    the whole channel. A score-62 candidate now maps to 71% confidence.
+
+    Harmony is derived from how many independent bounce layers agreed
+    (RSI / climax / Wyckoff spring / SMD / fib / patterns / BB) - it feeds
+    the composite ranking and makes the rec self-explanatory on the
+    dashboard, while validate_recommendation still exempts boosted recs
+    from the strategy-scale MIN_HARMONY gate.
+    """
+    score = float(c.get("score", 0))
+    confidence = min(settings.BOTTOM_CONF_CAP, 40.0 + score / 2.0)
+    n_layers = len(c.get("signals") or [])
+    harmony = round(min(0.85, 0.35 + 0.10 * max(0, n_layers - 1)), 2)
+    return {
+        "symbol": c["symbol"],
+        "direction": "bullish",
+        "weighted_score": score,
+        "confidence": confidence,
+        "admission_confidence": confidence,
+        "current_price": c["current_price"],
+        "expected_rise_pct": max(settings.MIN_EXPECTED_RISE,
+                                  c["atr_pct"] * 1.8),  # ~1.8x ATR
+        "stop_loss": c["stop_loss"],
+        "take_profit": c["take_profit"],
+        "risk_reward_ratio": c["risk_reward_ratio"],
+        "atr": float(c.get("atr_pct", 0) * c["current_price"] / 100),
+        "atr_pct": c["atr_pct"],
+        "harmony": harmony,
+        "signals": [{
+            "strategy": "bottom_scanner_boost",
+            "direction": "bullish",
+            "score": score,
+            "confidence": confidence / 100,
+            "reasons": c.get("signals", []),
+            "details": {
+                "bounce_score": score,
+                "recent_low": c.get("recent_low"),
+                "distance_from_low_pct": c.get("distance_from_low_pct"),
+                "patterns_detected": c.get("patterns_detected", []),
+            }
+        }],
+        "timeframe": settings.TIMEFRAMES[0] if settings.TIMEFRAMES else "15m",
+        "analyzed_at": c.get("analyzed_at"),
+        "boosted_from_bottom": True,
+    }
+
+
 class MarketAnalyzer:
     """Top-level orchestrator: fetch -> analyze -> score -> filter."""
 
@@ -188,26 +240,41 @@ class MarketAnalyzer:
             f"(confidence >= {settings.MIN_CONFIDENCE}%, expected rise >= {settings.MIN_EXPECTED_RISE}%)"
         )
 
-        # === BOOST MECHANISM: Integrate Bottom Scanner candidates ===
-        # The bottom scanner finds coins at recent lows with strong bounce signals.
-        # SAFETY RULES (v2):
-        #   - Only candidates with bounce score >= 60 (was 50 - too loose)
-        #   - Confirmed only if the last candle closed bullish (no falling knives)
-        #   - Max 2 boosted entries per cycle (they compete with real signals)
-        #   - Confidence capped at 72 so genuine strategy signals rank first
+        # === BOOST MECHANISM: Integrate Bottom Scanner candidates (v5.6) ===
+        # The bottom scanner finds coins at recent lows with strong bounce
+        # signals. v5.6 fixes the two silent blockers that made this channel
+        # dead (user report: "البوت لا يفتح توصيات من عملات القاع"):
+        #   1) Admission no longer reuses the STRATEGY confidence scale:
+        #      the bounce score has its own gate (BOTTOM_STRONG_SCORE) and
+        #      its own mapping (40 + score/2, cap BOTTOM_CONF_CAP). Under the
+        #      old formula (45 + score/3) + MIN_CONFIDENCE=68 the de-facto
+        #      floor was score >= 69 - most candidates died here.
+        #   2) Boosted recs now carry a bounce-derived "harmony" (layered
+        #      bounce agreement) AND validate_recommendation exempts them
+        #      from the strategy harmony gate - previously every boosted rec
+        #      was rejected at open time with "Harmony too low (0.00)".
+        # SAFETY RULES (kept):
+        #   - Last candle closed bullish (no falling knives)
+        #   - Max BOTTOM_MAX_PER_CYCLE boosted entries per cycle
+        #   - Confidence capped at BOTTOM_CONF_CAP: genuine strategy
+        #     signals still rank first
+        #   - RR must clear MIN_RR_RATIO (bottom SL/TP = 1.2/2.5 ATR -> ~2.08)
         strong_bottoms = []
         try:
+            if not settings.BOTTOM_BOOST_ENABLED:
+                log.info("[cyan]Bottom boost disabled[/] (BOTTOM_BOOST_ENABLED=false)")
+                raise StopIteration  # skip the whole boost block cleanly
             from src.analysis.bottom_scanner import bottom_scanner
             log.info("[cyan]Running bottom scanner for boost mechanism...[/]")
             bottom_candidates = bottom_scanner.scan(max_candidates=20, limit=200)
             strong_bottoms = [
                 c for c in bottom_candidates
-                if c.get("score", 0) >= 60
+                if c.get("score", 0) >= settings.BOTTOM_STRONG_SCORE
                 and c.get("last_candle_bullish", False)
             ]
             log.info(
                 f"[green]{len(strong_bottoms)} confirmed bottom candidates[/] "
-                f"(score >= 60 + bullish close)"
+                f"(score >= {settings.BOTTOM_STRONG_SCORE:g} + bullish close)"
             )
 
             # === Log bottom candidates to database ===
@@ -221,49 +288,33 @@ class MarketAnalyzer:
             existing_symbols = {r.get("symbol") for r in filtered}
             boosted = 0
             for c in strong_bottoms:
-                if boosted >= 2:
+                if boosted >= settings.BOTTOM_MAX_PER_CYCLE:
                     break
                 if c["symbol"] in existing_symbols:
                     continue
-                # Convert bottom candidate to recommendation format
-                confidence = min(72.0, 45.0 + c["score"] / 3)
-                rec = {
-                    "symbol": c["symbol"],
-                    "direction": "bullish",
-                    "weighted_score": float(c["score"]),
-                    "confidence": confidence,
-                    "current_price": c["current_price"],
-                    "expected_rise_pct": max(settings.MIN_EXPECTED_RISE,
-                                              c["atr_pct"] * 1.8),  # ~1.8x ATR
-                    "stop_loss": c["stop_loss"],
-                    "take_profit": c["take_profit"],
-                    "risk_reward_ratio": c["risk_reward_ratio"],
-                    "atr": float(c.get("atr_pct", 0) * c["current_price"] / 100),
-                    "atr_pct": c["atr_pct"],
-                    "signals": [{
-                        "strategy": "bottom_scanner_boost",
-                        "direction": "bullish",
-                        "score": c["score"],
-                        "confidence": confidence / 100,
-                        "reasons": c.get("signals", []),
-                        "details": {
-                            "bounce_score": c["score"],
-                            "recent_low": c.get("recent_low"),
-                            "distance_from_low_pct": c.get("distance_from_low_pct"),
-                            "patterns_detected": c.get("patterns_detected", []),
-                        }
-                    }],
-                    "timeframe": settings.TIMEFRAMES[0] if settings.TIMEFRAMES else "15m",
-                    "analyzed_at": c.get("analyzed_at"),
-                    "boosted_from_bottom": True,
-                }
-                # Boosted entries must pass the SAME confidence + R/R filters
-                if (rec["confidence"] >= settings.MIN_CONFIDENCE
-                        and rec["risk_reward_ratio"] >= settings.MIN_RR_RATIO):
+                rec = build_bottom_rec(c)
+                # Boosted entries must clear the RR gate; their ADMISSION
+                # gate is the bounce score (applied in strong_bottoms) - not
+                # the strategy-scale MIN_CONFIDENCE.
+                if rec["risk_reward_ratio"] >= settings.MIN_RR_RATIO:
                     filtered.append(rec)
                     boosted += 1
             if boosted:
                 log.info(f"[green]{boosted} bottom candidates boosted into recommendations[/]")
+                # v5.6: re-rank the merged list with the SAME composite key
+                # filter_signals uses, so boosted recs compete for the top
+                # MAX_RECOMMENDATIONS slots instead of being appended last
+                # and silently cut by the [:MAX_RECOMMENDATIONS] slice.
+                filtered.sort(
+                    key=lambda r: (
+                        r.get("confidence", 0)
+                        + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0
+                        + 4.0 * min(r.get("harmony", 0.0), 1.0)
+                    ),
+                    reverse=True,
+                )
+        except StopIteration:
+            pass
         except Exception as e:
             log.error(f"Bottom scanner boost failed: {e}")
 

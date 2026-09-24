@@ -223,6 +223,27 @@ class Settings:
     # Set to true for faster analysis of many symbols (loses liquidity strategy signal)
     SKIP_ORDER_BOOK: bool = os.getenv("SKIP_ORDER_BOOK", "false").lower() == "true"
 
+    # --- v5.6 Bottom-fishing admission (why bottom coins never opened) ---
+    # The boost channel was written when MIN_CONFIDENCE was 60. Two hidden
+    # couplings then silently killed it:
+    #   1) v4.1 raised MIN_CONFIDENCE 60 -> 68 while the boost formula
+    #      (45 + score/3, cap 72) needs score >= 69 to clear 68 - so the
+    #      documented "score >= 60" gate became a de-facto 69 gate.
+    #   2) validate_recommendation's harmony gate rejected EVERY boosted rec
+    #      (they carry no harmony key -> 0.0 < 0.45 = "Harmony too low"),
+    #      so even a boosted recommendation could NEVER become a position.
+    # v5.6 gives the channel its own explicit knobs and a bounce-derived
+    # harmony instead of the hidden coupling to the strategy scale.
+    BOTTOM_BOOST_ENABLED: bool = os.getenv(
+        "BOTTOM_BOOST_ENABLED", "true").lower() == "true"
+    # Min bounce score (0..100) for a bottom candidate to be boosted
+    # (documented intent was 60; 62 + bullish-close + RR gates keep it safe)
+    BOTTOM_STRONG_SCORE: float = float(os.getenv("BOTTOM_STRONG_SCORE", "62"))
+    # Max boosted bottom entries per cycle (they compete for the top slots)
+    BOTTOM_MAX_PER_CYCLE: int = int(os.getenv("BOTTOM_MAX_PER_CYCLE", "2"))
+    # Confidence cap for boosted entries so genuine strategy signals rank first
+    BOTTOM_CONF_CAP: float = float(os.getenv("BOTTOM_CONF_CAP", "72"))
+
     # --- Market Map: leader/follower correlation classification (v5.2) ---
     # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).
     # We classify each symbol to its highest-correlated leader and use the

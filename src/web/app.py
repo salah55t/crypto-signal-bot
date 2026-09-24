@@ -351,6 +351,28 @@ async def get_bottom_candidates():
     })
 
 
+@app.get("/api/config")
+async def get_public_config():
+    """
+    v5.6: public admission knobs for the dashboard info banners
+    (توصية vs صفقة مفتوحة + bottom-boost gates). Read-only, no secrets.
+    """
+    return {
+        "min_confidence": settings.MIN_CONFIDENCE,
+        "min_rr_ratio": settings.MIN_RR_RATIO,
+        "min_harmony": settings.MIN_HARMONY,
+        "max_open_positions": settings.MAX_OPEN_POSITIONS,
+        "max_recommendations": settings.MAX_RECOMMENDATIONS,
+        "trade_amount_usd": settings.TRADE_AMOUNT_USD,
+        "bottom_boost_enabled": settings.BOTTOM_BOOST_ENABLED,
+        "bottom_strong_score": settings.BOTTOM_STRONG_SCORE,
+        "bottom_max_per_cycle": settings.BOTTOM_MAX_PER_CYCLE,
+        "bottom_conf_cap": settings.BOTTOM_CONF_CAP,
+        "timeframes": settings.TIMEFRAMES,
+        "run_mode": settings.RUN_MODE,
+    }
+
+
 @app.post("/api/scan-bottoms")
 async def scan_bottoms_now():
     """Trigger an immediate bottom scan in background."""

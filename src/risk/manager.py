@@ -210,8 +210,14 @@ class RiskManager:
             reasons.append(f"Expected rise too low ({rec['expected_rise_pct']:.2f}%)")
         if rec.get("stop_loss", 0) <= 0:
             reasons.append("Invalid stop loss")
-        # v5: layered harmony gate - a veteran requires layered agreement
-        if float(rec.get("harmony", 0.0)) < settings.MIN_HARMONY:
+        # v5: layered harmony gate - a veteran requires layered agreement.
+        # v5.6: bottom-boosted recs are EXEMPT - they carry their own layered
+        # gate (bounce score >= BOTTOM_STRONG_SCORE + bullish close + RR) and
+        # a bounce-derived harmony. Without the exemption the strategy-scale
+        # gate rejected EVERY bottom rec (no harmony key -> 0.0 < 0.45), which
+        # is why the bot never opened a position from bottom coins.
+        if (not rec.get("boosted_from_bottom")
+                and float(rec.get("harmony", 0.0)) < settings.MIN_HARMONY):
             reasons.append(
                 f"Harmony too low ({rec.get('harmony', 0.0):.2f} "
                 f"< {settings.MIN_HARMONY:.2f})"
