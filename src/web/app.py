@@ -155,13 +155,14 @@ async def get_positions():
     positions = risk_manager.open_positions
     if not positions:
         return []
-    # Fetch current prices for all position symbols
+    # Fetch current prices for all position symbols.
+    # NOTE: get_batch_tickers hits /ticker/price whose rows have key "price"
+    # (NOT "lastPrice" from /ticker/24hr) — reading lastPrice here silently
+    # zeroed every price and the dashboard showed no P&L. get_batch_prices
+    # handles both key shapes.
     symbols = list({p["symbol"] for p in positions})
     try:
-        tickers = data_fetcher.get_batch_tickers(symbols)
-        current_prices = {
-            sym: float(t.get("lastPrice", 0)) for sym, t in tickers.items()
-        }
+        current_prices = data_fetcher.get_batch_prices(symbols)
     except Exception as e:
         log.error(f"Failed to fetch prices for positions: {e}")
         current_prices = {}
