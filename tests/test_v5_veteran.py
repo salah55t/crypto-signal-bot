@@ -329,3 +329,26 @@ def test_rate_limiter_cooldown_blocks_all():
     rl.trigger_cooldown(5.0)
     assert rl.in_cooldown()
     assert rl.acquire(1.0, timeout=0.1) is False
+
+
+def test_tickers_batch_symbols_param_has_no_spaces():
+    """Regression: json.dumps default separator ', ' -> %5B%22A%22,+%22B%22%5D
+    is rejected by Binance (code -1100, illegal characters)."""
+    from src.core.binance_client import binance_client
+    captured = {}
+
+    def fake_get(path, params):
+        captured["path"] = path
+        captured["params"] = params
+        return [{"symbol": "ACEUSDT", "price": "0.1793"}]
+
+    original = binance_client._get
+    binance_client._get = fake_get
+    try:
+        out = binance_client.get_tickers_batch(["ACEUSDT", "LTCUSDT", "RAYUSDT"])
+    finally:
+        binance_client._get = original
+    assert out["ACEUSDT"]["price"] == "0.1793"
+    sym = captured["params"]["symbols"]
+    assert " " not in sym and "+" not in sym
+    assert sym == '["ACEUSDT","LTCUSDT","RAYUSDT"]'

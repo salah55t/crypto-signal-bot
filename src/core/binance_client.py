@@ -157,7 +157,10 @@ class BinanceClient:
             for i in range(0, len(symbols), 100):
                 out.update(self.get_tickers_batch(symbols[i:i + 100]))
             return out
-        params = {"symbols": json.dumps(list(symbols))}
+        # Binance rejects spaces in the symbols array (code -1100):
+        # json.dumps default separator is ", " -> ["A", "B"] is INVALID.
+        # separators=(",", ":") produces ["A","B"] as the API requires.
+        params = {"symbols": json.dumps(list(symbols), separators=(",", ":"))}
         rows = self._get("/api/v3/ticker/price", params)
         rows = rows if isinstance(rows, list) else [rows]
         return {r["symbol"]: r for r in rows if r.get("symbol")}
