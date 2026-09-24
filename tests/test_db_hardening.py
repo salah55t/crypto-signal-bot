@@ -76,3 +76,67 @@ def test_sqlite_init_still_works(tmp_path):
     d.log_run("2026-09-24T00:00:00", 1.0, 1, 0, 0, 0, "paper", None)
     rows = d.get_daily_stats(limit=1)
     assert isinstance(rows, list)
+
+
+def test_strategy_performance_postgres_casts_text_timestamp(tmp_path, monkeypatch):
+    """Regression (2026-09-24): recommendations.timestamp is TEXT in Postgres
+    (schema is shared with SQLite). Comparing it to NOW() - INTERVAL without
+    an explicit cast failed with "operator does not exist: text >= timestamp
+    with time zone", so /api/stats/strategies returned {"error": ...}."""
+    d = _pg(tmp_path)
+    captured = {}
+
+    class _FakeCur:
+        description = [("strategy_name",), ("total_signals",)]
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchall(self):
+            return [("v5_confluence", 7)]
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def cursor(self):
+            return _FakeCur()
+
+    d._initialized = True                       # skip schema, exercise query only
+    monkeypatch.setattr(d, "_connect", lambda: _FakeConn())
+
+    rows = d.get_strategy_performance(days=30)
+    assert rows == [{"strategy_name": "v5_confluence", "total_signals": 7}]
+    # The TEXT timestamp column MUST be cast before comparing with timestamptz
+    assert "recommendations.timestamp::timestamptz >= NOW() - INTERVAL" in captured["sql"]
+    assert captured["params"] == ("30 days",)
+
+
+def test_strategy_performance_sqlite_end_to_end(tmp_path):
+    """SQLite branch of the same query: real temp DB, insert run +
+    recommendation + strategy signal, verify aggregation works."""
+    d = Database(db_url=None, db_path=tmp_path / "local.db")
+    run_id = d.log_run("2026-09-24T03:00:00", 2.0, 5, 1, 1, 0, "paper", None)
+    d.log_recommendation(run_id, {
+        "analyzed_at": "2026-09-24T03:00:05+00:00",
+        "symbol": "BTCUSDT",
+        "direction": "bullish",
+        "confidence": 0.8,
+        "weighted_score": 7.5,
+        "signals": [{
+            "strategy": "v5_confluence",
+            "direction": "bullish",
+            "score": 3.0,
+            "confidence": 0.9,
+            "reasons": "test",
+        }],
+    })
+    rows = d.get_strategy_performance(days=30)
+    assert len(rows) == 1
+    assert rows[0]["strategy_name"] == "v5_confluence"
+    assert rows[0]["total_signals"] == 1
+    assert rows[0]["bullish_signals"] == 1

@@ -594,7 +594,10 @@ class Database:
         with self._connect() as conn:
             cur = conn.cursor()
             if self.use_postgres:
-                # PostgreSQL date arithmetic
+                # PostgreSQL date arithmetic.
+                # NOTE: timestamp is TEXT (ISO-8601, shared schema with SQLite) —
+                # cast to timestamptz or the comparison fails with
+                # "operator does not exist: text >= timestamp with time zone".
                 cur.execute(
                     f"""SELECT
                         strategy_name,
@@ -606,7 +609,7 @@ class Database:
                         AVG(strategy_signals.confidence) as avg_confidence
                         FROM strategy_signals
                         JOIN recommendations ON strategy_signals.recommendation_id = recommendations.id
-                        WHERE recommendations.timestamp >= NOW() - INTERVAL %s
+                        WHERE recommendations.timestamp::timestamptz >= NOW() - INTERVAL %s
                         GROUP BY strategy_name
                         ORDER BY total_signals DESC""",
                     (f"{days} days",)
