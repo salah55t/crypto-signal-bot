@@ -140,18 +140,25 @@ class BinanceClient:
             if used:
                 rate_limiter.note_server_weight(used)
             if response.status_code == 429 or response.status_code == 418:
-                retry_after = response.headers.get("Retry-After", "30")
+                retry_after = response.headers.get("Retry-After", "")
                 try:
                     retry_after = float(retry_after)
                 except ValueError:
-                    retry_after = 30.0
+                    retry_after = 0.0
                 if response.status_code == 418:
                     # v5.2: IP auto-ban - Retry-After can be minutes..hours and
                     # every request sent during the ban can EXTEND it. Back off
                     # hard (>= 15 min) instead of poking it every cycle.
                     cooldown = min(max(retry_after, 900.0), 3600.0)
                 else:
-                    cooldown = min(retry_after + 2, 120.0)
+                    # v5.12: honor Retry-After FULLY. The old 120s cap made us
+                    # poke a still-hot shared IP every 2 minutes, and Binance
+                    # punishes repeated 429 violations by escalating to a 418
+                    # IP auto-ban (production 2026-09-26: "598s ban left"
+                    # abort-storm). If the server names a wait, we wait it.
+                    if retry_after <= 0:
+                        retry_after = 30.0
+                    cooldown = min(retry_after + 2.0, 3600.0)
                 rate_limiter.trigger_cooldown(cooldown)
                 raise RateLimitError(
                     f"Binance {response.status_code}: {response.text[:120]}"

@@ -1,6 +1,7 @@
 """Helper utilities."""
 import json
 import time
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,36 @@ import pandas as pd
 import numpy as np
 
 from src.utils.logger import log
+
+# v5.12: during a Binance 418 ban EVERY queued call fails fast with the same
+# "aborting fast" message - production showed one WARNING per symbol per
+# timeframe (hundreds of lines for a single 10-minute ban). Throttle it to
+# one line per 60s; repeats go to DEBUG.
+_BAN_LOG_LOCK = threading.Lock()
+_BAN_LOG_LAST_TS = 0.0
+_BAN_LOG_SUPPRESSED = 0
+
+
+def _log_ban_abort(fn_name: str, cooldown_left: float) -> None:
+    """Log a rate-ban abort at most once per 60s (suppressions counted)."""
+    global _BAN_LOG_LAST_TS, _BAN_LOG_SUPPRESSED
+    now = time.time()
+    with _BAN_LOG_LOCK:
+        if now - _BAN_LOG_LAST_TS >= 60.0:
+            suppressed = _BAN_LOG_SUPPRESSED
+            _BAN_LOG_LAST_TS = now
+            _BAN_LOG_SUPPRESSED = 0
+            extra = f" ({suppressed} similar lines suppressed)" if suppressed else ""
+            log.warning(
+                f"Rate-limited on {fn_name} with {cooldown_left:.0f}s ban left "
+                f"- aborting fast{extra}"
+            )
+        else:
+            _BAN_LOG_SUPPRESSED += 1
+            log.debug(
+                f"Rate-limited on {fn_name} with {cooldown_left:.0f}s ban left "
+                f"- aborting fast (suppressed)"
+            )
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -106,9 +137,10 @@ def retry_on_failure(func, retries: int = 3, delay: float = 1.0, exceptions=(Exc
                     # v5.2: hard backoff (418 IP ban >= 15 min) - sleeping 45s
                     # per fetch would just limp the whole cycle for nothing.
                     # Abort fast; the next cron tick retries when the ban lifts.
-                    log.warning(
-                        f"Rate-limited on {getattr(func, '__name__', 'call')} "
-                        f"with {cooldown_left:.0f}s ban left - aborting fast"
+                    # v5.12: log throttled (one line/60s) - a single ban used
+                    # to spam one WARNING per symbol per timeframe.
+                    _log_ban_abort(
+                        getattr(func, "__name__", "call"), cooldown_left
                     )
                     raise
                 backoff = max(15.0, cooldown_left + 1.0)

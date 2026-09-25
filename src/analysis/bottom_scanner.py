@@ -148,6 +148,20 @@ class BottomScanner:
         Scan all symbols for bottom-reversal candidates.
         Returns top 20 candidates sorted by score.
         """
+        # v5.12: a hard 429/418 ban makes every klines REST call here doomed
+        # (the scanner is the second-biggest klines consumer after the
+        # analyzer). Bail out cleanly - the analyzer's boost block treats an
+        # empty list as "no candidates" and the next cycle retries.
+        try:
+            from src.core.rate_limiter import rate_limiter
+            if rate_limiter.cooldown_remaining() > 130.0:
+                log.warning(
+                    f"[yellow]Bottom scanner skipped[/] - Binance rate ban "
+                    f"active ({rate_limiter.cooldown_remaining():.0f}s left)"
+                )
+                return []
+        except Exception:
+            pass
         if symbols is None:
             from src.analysis.analyzer import analyzer
             analyzer.refresh_symbols()

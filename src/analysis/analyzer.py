@@ -18,6 +18,20 @@ from src.utils.helpers import save_json, now_utc, to_json_safe
 RECOMMENDATIONS_FILE = Path("data/recommendations.json")
 
 
+def _ban_active(threshold: float = 130.0) -> bool:
+    """v5.12: True while a hard Binance 429/418 cooldown is in force.
+
+    Mirrors the retry_on_failure abort threshold (130s): below it calls
+    still back off and retry; above it every REST call is doomed, so the
+    whole burst should stop instead of grinding through the symbol list.
+    """
+    try:
+        from src.core.rate_limiter import rate_limiter
+        return rate_limiter.cooldown_remaining() > threshold
+    except Exception:
+        return False
+
+
 def build_bottom_rec(c: Dict) -> Dict:
     """v5.6: convert a bottom-scanner candidate into a recommendation dict.
 
@@ -76,6 +90,10 @@ class MarketAnalyzer:
     def __init__(self):
         self.excluded = settings.load_excluded()
         self._symbols_ts = None  # ts of last dynamic symbol-list refresh
+        # v5.12: set when the analysis burst was aborted by a Binance rate
+        # ban - cycle.py checks it to skip notifications and keep the last
+        # good recommendations snapshot intact.
+        self.last_run_aborted = False
         if settings.USE_ALL_USDT_PAIRS:
             # Fetch all USDT pairs dynamically from Binance
             self.symbols = self._fetch_all_usdt_pairs()
@@ -143,6 +161,10 @@ class MarketAnalyzer:
 
     def analyze_one(self, symbol: str) -> Dict:
         """Fetch data and run analysis for one symbol."""
+        # v5.12: mid-burst ban - fail this symbol WITHOUT a doomed network
+        # attempt and flag the reason so analyze_all can abort the burst.
+        if _ban_active():
+            return {"symbol": symbol, "skip": True, "reason": "rate ban"}
         try:
             # Fetch multi-timeframe candles
             multi_tf = data_fetcher.get_multi_timeframe_candles(
@@ -197,21 +219,50 @@ class MarketAnalyzer:
             self.refresh_symbols()
 
         results = []
+        ban_skips = 0  # v5.12: symbols skipped because a ban went active
         if parallel and len(self.symbols) > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 futures = {ex.submit(self.analyze_one, s): s for s in self.symbols}
                 for fut in as_completed(futures):
                     try:
                         r = fut.result()
+                        if r.get("reason") == "rate ban":
+                            ban_skips += 1
+                            continue
                         if not r.get("skip"):
                             results.append(r)
                     except Exception as e:
                         log.error(f"Future error: {e}")
+                    # v5.12: a ban went active mid-burst - cancel the queued
+                    # futures (they would all fail fast anyway) and stop now.
+                    if ban_skips >= 3 and _ban_active():
+                        for f in futures:
+                            f.cancel()
+                        break
         else:
             for s in self.symbols:
                 r = self.analyze_one(s)
+                if r.get("reason") == "rate ban":
+                    ban_skips += 1
+                    if ban_skips >= 3 and _ban_active():
+                        break
+                    continue
                 if not r.get("skip"):
                     results.append(r)
+
+        # v5.12: burst aborted by a rate ban -> keep the LAST GOOD snapshot.
+        # Overwriting data/recommendations.json with an empty/parital run
+        # used to blank the dashboard and trigger "No strong signals" while
+        # the real problem was the ban, not the market.
+        if ban_skips >= 3 or (ban_skips > 0 and _ban_active()):
+            self.last_run_aborted = True
+            log.warning(
+                f"[yellow]Analysis burst ABORTED by Binance rate ban "
+                f"({ban_skips} symbol(s) skipped) - last good recommendations "
+                f"snapshot kept; positions stay guarded by the 1-min watcher[/]"
+            )
+            return []
+        self.last_run_aborted = False
 
         log.info(
             f"[green]Analysis complete[/] - {len(results)}/{len(self.symbols)} "

@@ -250,6 +250,16 @@ class WSKlineFeed:
                 if not sym:
                     continue
                 try:
+                    # v5.12: a hard 429/418 ban dooms every REST reseed call -
+                    # pause the reseed (flag stays True) and let the next
+                    # reconnect/next cycle finish it when the ban lifts.
+                    from src.core.rate_limiter import rate_limiter
+                    if rate_limiter.cooldown_remaining() > 130.0:
+                        log.warning(
+                            f"[yellow]WS feed reseed paused[/] - rate ban "
+                            f"active ({rate_limiter.cooldown_remaining():.0f}s left)"
+                        )
+                        return
                     # bypass the cache read - reseed must hit REST directly
                     df = DataFetcher._get_candles_rest(sym, interval, 200)
                     self.ingest(sym, df, interval=interval)
@@ -312,14 +322,37 @@ class WSKlineFeed:
         return (now - last) <= ttl
 
     def get_cached(self, symbol: str, limit: int = 200,
-                   interval: str = "1h"):
+                   interval: str = "1h", allow_stale: bool = False,
+                   max_age_s: Optional[float] = None):
         """Return a candle DataFrame from the live cache, or None.
 
         None means "use REST" - every caller must degrade gracefully.
+
+        v5.12: `allow_stale=True` serves the series even when the 15-min
+        freshness TTL has lapsed (bounded by `max_age_s`, default 6h).
+        Used when a Binance REST ban makes refetching impossible: analyzing
+        a few-hours-old 4h series beats aborting the whole cycle. WS events
+        keep flowing during REST bans (different service), so the cache is
+        often still live anyway.
         """
         from src.core.data_fetcher import DataFetcher  # lazy: avoid circulars
-        if not self.fresh(symbol, min_bars=min(limit, 60), interval=interval):
+        min_bars = min(limit, 60)
+        if not settings.USE_WS_FEED or not self._started:
             return None
+        with self._lock:
+            bars = self._bars.get(self._key(symbol, interval))
+            n = len(bars) if bars else 0
+            last = self._last_event.get(self._key(symbol, interval), 0.0)
+        if n < min_bars:
+            return None
+        if not allow_stale:
+            if not self.fresh(symbol, min_bars=min_bars, interval=interval):
+                return None
+        else:
+            now = time.monotonic()
+            cap = max_age_s if max_age_s is not None else 6 * 3600.0
+            if (now - last) > cap:
+                return None
         with self._lock:
             bars = list(self._bars.get(self._key(symbol, interval)) or [])
         if len(bars) < limit:

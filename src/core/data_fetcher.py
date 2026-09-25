@@ -67,6 +67,22 @@ class DataFetcher:
                 cached = ws_feed.get_cached(symbol, limit, interval=interval)
                 if cached is not None:
                     return cached
+                # v5.12: during a hard 429/418 REST ban, refetching is
+                # impossible - serve the slightly stale WS series (WS events
+                # keep flowing; REST bans do not touch the WS service).
+                # A few-hours-old 4h candle set beats an aborted cycle.
+                from src.core.rate_limiter import rate_limiter
+                if rate_limiter.cooldown_remaining() > 60.0:
+                    stale = ws_feed.get_cached(
+                        symbol, limit, interval=interval,
+                        allow_stale=True, max_age_s=6 * 3600.0,
+                    )
+                    if stale is not None:
+                        log.debug(
+                            f"Rate ban active - serving stale WS cache for "
+                            f"{symbol} {interval}"
+                        )
+                        return stale
             except Exception:
                 pass  # cache must never break the REST path
         return DataFetcher._get_candles_rest(symbol, interval, limit)
@@ -74,7 +90,21 @@ class DataFetcher:
     @staticmethod
     def _get_candles_rest(symbol: str, interval: str = "1h",
                           limit: int = 200) -> pd.DataFrame:
-        """REST fetch + cache ingest (bypasses the WS read - used by reseeds)."""
+        """REST fetch + cache ingest (bypasses the WS read - used by reseeds).
+
+        v5.12: fast-fail during a hard 429/418 ban (>130s left) WITHOUT
+        entering retry_on_failure - during the 2026-09-26 598s ban every
+        queued call still walked the acquire->raise->retry path, spamming
+        the log and churning CPU for a guaranteed failure. One check here
+        protects get_candles, reseeds and any direct REST caller.
+        """
+        from src.core.rate_limiter import rate_limiter, RateLimitError
+        ban_left = rate_limiter.cooldown_remaining()
+        if ban_left > 130.0:
+            raise RateLimitError(
+                f"Binance REST ban active ({ban_left:.0f}s left) - "
+                f"klines fetch skipped"
+            )
         raw = binance_client.get_klines(symbol, interval, limit=limit)
         df = DataFetcher.klines_to_df(raw)
         if interval in (settings.WS_INTERVALS or ["1h"]) \

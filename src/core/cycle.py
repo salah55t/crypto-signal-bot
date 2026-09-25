@@ -509,6 +509,22 @@ def run_analysis_cycle():
     # ---- STEP 2: market analysis ----
     recommendations = analyzer_analyze()
 
+    # v5.12: the burst was aborted mid-way by a Binance 429/418 ban. The
+    # last good recommendations snapshot is untouched; sending "no signals"
+    # notifications or trading on the empty result would be wrong. The
+    # 1-minute position watcher stays fully armed either way.
+    try:
+        from src.analysis.analyzer import analyzer
+        aborted = getattr(analyzer, "last_run_aborted", False)
+    except Exception:
+        aborted = False
+    if aborted:
+        log.warning(
+            "[yellow]Cycle aborted by rate ban[/] - no notifications sent, "
+            "last recommendations snapshot kept"
+        )
+        return
+
     # ---- STEP 3: trailing + structural exits with FRESH signals ----
     if risk_manager.open_positions and recommendations:
         try:
