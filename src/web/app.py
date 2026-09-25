@@ -183,10 +183,20 @@ async def get_positions():
     # handles both key shapes.
     symbols = list({p["symbol"] for p in positions})
     try:
-        current_prices = data_fetcher.get_batch_prices(symbols)
+        # v5.10: priority lane - position P&L must not be starved by the
+        # bulk analysis burst inside the shared rate budget.
+        current_prices = data_fetcher.get_batch_prices(symbols, priority=True)
     except Exception as e:
-        log.error(f"Failed to fetch prices for positions: {e}")
-        current_prices = {}
+        # v5.10: during a shared-IP pressure cooldown serve last-known
+        # prices (<= 15 min) so the dashboard keeps showing P&L instead
+        # of the old double-failure (2w batch + 80w full-market abort).
+        current_prices = data_fetcher.get_last_known_prices(symbols, max_age_s=900)
+        if current_prices:
+            log.warning(
+                f"Position prices: live fetch failed ({e}) - "
+                f"serving {len(current_prices)} last-known price(s)")
+        else:
+            log.error(f"Failed to fetch prices for positions: {e}")
     return risk_manager.get_positions_with_pnl(current_prices)
 
 

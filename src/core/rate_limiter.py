@@ -47,11 +47,18 @@ class WeightedRateLimiter:
     PRESSURE_RESET_S = 600.0    # quiet period that resets the streak
     LOW_WEIGHT_PCT = 0.80       # header below this cools the streak down
 
-    def __init__(self, budget_per_min: float = 4500.0, hard_ceiling: int = 6000):
+    def __init__(self, budget_per_min: float = 4500.0, hard_ceiling: int = 6000,
+                 priority_reserve: float = 200.0):
         if budget_per_min <= 0:
             budget_per_min = 4500.0
         self.budget = float(budget_per_min)
         self.hard_ceiling = int(hard_ceiling)
+        # v5.10: the last PRIORITY_RESERVE weight units of the budget are
+        # reserved for PRIORITY requests (position watch, dashboard P&L,
+        # pending-entry fills). Bulk traffic (analysis burst, market map)
+        # stops at budget - reserve so a full analysis window can never
+        # starve the tiny (2w) requests that keep open positions safe.
+        self.priority_reserve = max(0.0, float(priority_reserve))
         self._events = deque()  # (monotonic_ts, weight)
         self._lock = threading.Lock()
         self._cooldown_until = 0.0  # monotonic ts
@@ -67,10 +74,15 @@ class WeightedRateLimiter:
         return sum(w for _, w in self._events)
 
     # ------------------------------------------------------------------
-    def acquire(self, weight: float, timeout: float = 90.0) -> bool:
+    def acquire(self, weight: float, timeout: float = 90.0,
+                priority: bool = False) -> bool:
         """
         Reserve `weight` units. Blocks until they fit in the rolling window.
         Returns True when reserved, False if `timeout` expires first.
+
+        v5.10: `priority=True` (position watch / dashboard / pending fills)
+        may use the FULL budget; normal (bulk) traffic is capped at
+        budget - priority_reserve so monitoring requests always fit.
         """
         weight = max(1.0, float(weight))
         deadline = time.monotonic() + max(0.0, timeout)
@@ -86,12 +98,16 @@ class WeightedRateLimiter:
             with self._lock:
                 now = time.monotonic()
                 used = self._prune(now)
-                if used + weight <= self.budget:
+                # v5.10: priority traffic may use the full budget; bulk
+                # traffic must leave the priority reserve untouched.
+                effective = self.budget if priority else \
+                    max(1.0, self.budget - self.priority_reserve)
+                if used + weight <= effective:
                     self._events.append((now, weight))
                     return True
                 # Weight doesn't fit: figure out how long until enough old
                 # events expire to free the required room.
-                needed = used + weight - self.budget
+                needed = used + weight - effective
                 wait = 0.0
                 acc = 0.0
                 for ts, w in self._events:  # oldest first
@@ -196,4 +212,5 @@ from config.settings import settings as _settings
 
 rate_limiter = WeightedRateLimiter(
     budget_per_min=float(_settings.RATE_LIMIT_BUDGET_PER_MIN),
+    priority_reserve=float(getattr(_settings, "RATE_PRIORITY_RESERVE", 200.0)),
 )

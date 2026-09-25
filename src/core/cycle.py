@@ -39,12 +39,15 @@ RECOMMENDATIONS_FILE = DATA_DIR / "recommendations.json"
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-def fetch_prices(symbols) -> Dict[str, float]:
-    """v5: batched price fetch - ONE request (weight 2-4), not 80."""
+def fetch_prices(symbols, priority: bool = False) -> Dict[str, float]:
+    """v5: batched price fetch - ONE request (weight 2-4), not 80.
+    v5.10: priority=True uses the reserved lane of the rate limiter
+    (position watch / dashboard must not be starved by bulk analysis).
+    """
     if not symbols:
         return {}
     try:
-        return data_fetcher.get_batch_prices(symbols)
+        return data_fetcher.get_batch_prices(symbols, priority=priority)
     except Exception as e:
         log.error(f"Batch price fetch failed: {e}")
         return {}
@@ -129,7 +132,13 @@ def manage_open_positions(market_signals: Dict[str, Dict] = None,
         return ([], [])
 
     pos_symbols = list({p["symbol"] for p in risk_manager.open_positions})
-    current_prices = fetch_prices(pos_symbols)
+    # v5.10: priority lane - SL/TP checks on open positions are exactly the
+    # traffic the reserved budget exists for; add the last-known fallback so
+    # a pressure cooldown does not leave positions unmanaged.
+    current_prices = fetch_prices(pos_symbols, priority=True)
+    if not current_prices:
+        current_prices = data_fetcher.get_last_known_prices(
+            pos_symbols, max_age_s=120)
     if not current_prices:
         log.warning("Could not fetch prices for open positions - skipping management")
         return ([], [])
@@ -213,7 +222,16 @@ def run_position_watch():
         symbols = list({
             p["symbol"] for p in risk_manager.open_positions
         } | {p["symbol"] for p in risk_manager.pending_entries})
-        prices = fetch_prices(symbols)
+        # v5.10: priority lane first; if even that fails (shared-IP cooldown),
+        # very-fresh last-known prices (<= 120s) keep SL/TP checking alive
+        # instead of going blind for the whole cooldown window.
+        prices = fetch_prices(symbols, priority=True)
+        if not prices:
+            prices = data_fetcher.get_last_known_prices(symbols, max_age_s=120)
+            if prices:
+                log.info(
+                    f"[yellow]Position watch:[/] live fetch unavailable - "
+                    f"using last-known prices for {len(prices)} symbol(s)")
         if not prices:
             return
 

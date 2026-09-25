@@ -48,7 +48,7 @@ def test_positions_price_from_ticker_price_payload(monkeypatch):
     surface it as current_price (was silently zeroed via lastPrice lookup)."""
     monkeypatch.setattr(risk_manager, "open_positions", [_fake_position()])
 
-    def fake_batch(symbols):
+    def fake_batch(symbols, priority=False):
         rows = [{"symbol": s, "price": "1.05"} for s in symbols]
         return {r["symbol"]: r for r in rows}
 
@@ -68,7 +68,7 @@ def test_positions_price_from_ticker_price_payload(monkeypatch):
 def test_get_batch_prices_handles_both_key_shapes(monkeypatch):
     """get_batch_prices must accept /ticker/price rows ('price') AND
     legacy /ticker/24hr rows ('lastPrice')."""
-    def fake_batch(symbols):
+    def fake_batch(symbols, priority=False):
         return {
             "ACEUSDT": {"symbol": "ACEUSDT", "price": "1.05"},      # /ticker/price
             "LTCUSDT": {"symbol": "LTCUSDT", "lastPrice": "88.5"},  # /ticker/24hr
@@ -88,7 +88,10 @@ def test_positions_without_price_degrades_gracefully(monkeypatch):
         raise ConnectionError("binance down")
 
     monkeypatch.setattr(dfmod.binance_client, "get_tickers_batch", failing)
+    monkeypatch.setattr(dfmod.binance_client, "get_all_prices", failing)
     monkeypatch.setattr(dfmod.binance_client, "get_all_tickers", failing)
+    # no last-known prices cached either (fresh test state)
+    monkeypatch.setattr(dfmod.DataFetcher, "_LAST_PRICES", {})
 
     r = client.get("/api/positions")
     assert r.status_code == 200

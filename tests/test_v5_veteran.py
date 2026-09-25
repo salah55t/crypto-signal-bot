@@ -318,7 +318,9 @@ def test_endpoint_weights():
 
 
 def test_rate_limiter_blocks_over_budget():
-    rl = WeightedRateLimiter(budget_per_min=10.0)
+    # reserve=0 keeps the classic semantics (the reserve lane has its own
+    # dedicated tests in test_v510_rate_priority.py)
+    rl = WeightedRateLimiter(budget_per_min=10.0, priority_reserve=0.0)
     assert rl.acquire(6.0, timeout=0.1) is True
     assert rl.acquire(6.0, timeout=0.1) is False  # over budget -> refuse fast
     assert rl.used_weight() == pytest.approx(6.0)
@@ -337,7 +339,7 @@ def test_tickers_batch_symbols_param_has_no_spaces():
     from src.core.binance_client import binance_client
     captured = {}
 
-    def fake_get(path, params):
+    def fake_get(path, params, priority=False):
         captured["path"] = path
         captured["params"] = params
         return [{"symbol": "ACEUSDT", "price": "0.1793"}]

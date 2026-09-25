@@ -106,8 +106,12 @@ class BinanceClient:
         return params
 
     def _get(self, path: str, params: Optional[Dict] = None,
-             signed: bool = False) -> Dict[str, Any]:
-        """Perform a GET request to Binance API (rate-limit aware, v5)."""
+             signed: bool = False, priority: bool = False) -> Dict[str, Any]:
+        """Perform a GET request to Binance API (rate-limit aware, v5).
+
+        v5.10: `priority=True` requests (position watch, dashboard P&L,
+        pending-entry fills) may consume the reserved tail of the rate
+        budget that bulk traffic cannot touch."""
         # Use signed_url for signed requests, base_url for public
         base = self.signed_url if signed else self.base_url
         url = f"{base}{path}"
@@ -123,7 +127,7 @@ class BinanceClient:
         # v5: reserve request weight BEFORE firing (blocks when the shared
         # IP is near the ceiling; honours 429 cooldowns globally).
         weight = _endpoint_weight(path, params)
-        if not rate_limiter.acquire(weight, timeout=90.0):
+        if not rate_limiter.acquire(weight, timeout=90.0, priority=priority):
             raise RateLimitError(
                 f"Rate budget exhausted ({weight}w needed); "
                 "request aborted to avoid a 429 ban"
@@ -163,7 +167,8 @@ class BinanceClient:
             log.error(f"Binance API request error: {e}")
             raise
 
-    def get_tickers_batch(self, symbols: List[str]) -> Dict[str, Dict]:
+    def get_tickers_batch(self, symbols: List[str],
+                          priority: bool = False) -> Dict[str, Dict]:
         """
         v5: batched /api/v3/ticker/price for selected symbols.
         Weight 2 (<=100 symbols) instead of 80 for the full /ticker/24hr
@@ -176,13 +181,14 @@ class BinanceClient:
             # endpoint caps at 100 symbols per call
             out: Dict[str, Dict] = {}
             for i in range(0, len(symbols), 100):
-                out.update(self.get_tickers_batch(symbols[i:i + 100]))
+                out.update(self.get_tickers_batch(symbols[i:i + 100],
+                                                  priority=priority))
             return out
         # Binance rejects spaces in the symbols array (code -1100):
         # json.dumps default separator is ", " -> ["A", "B"] is INVALID.
         # separators=(",", ":") produces ["A","B"] as the API requires.
         params = {"symbols": json.dumps(list(symbols), separators=(",", ":"))}
-        rows = self._get("/api/v3/ticker/price", params)
+        rows = self._get("/api/v3/ticker/price", params, priority=priority)
         rows = rows if isinstance(rows, list) else [rows]
         return {r["symbol"]: r for r in rows if r.get("symbol")}
 
@@ -207,8 +213,18 @@ class BinanceClient:
         return self._get("/api/v3/exchangeInfo")
 
     def get_all_tickers(self) -> List[Dict[str, Any]]:
-        """Get ticker prices for all symbols."""
+        """Get 24h ticker stats for all symbols (weight 80 - avoid for prices)."""
         return self._get("/api/v3/ticker/24hr")
+
+    def get_all_prices(self, priority: bool = False) -> List[Dict[str, Any]]:
+        """v5.10: latest price for ALL symbols via /api/v3/ticker/price.
+
+        Weight 4 for the WHOLE market (vs 80 for /ticker/24hr) - the correct
+        fallback when the batched call fails: 20x cheaper and it still
+        covers every symbol (rows carry the "price" key).
+        """
+        rows = self._get("/api/v3/ticker/price", priority=priority)
+        return rows if isinstance(rows, list) else [rows]
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
         """Get 24h ticker stats for a symbol."""

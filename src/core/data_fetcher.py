@@ -134,30 +134,63 @@ class DataFetcher:
         return binance_client.get_ticker(symbol)
 
     @staticmethod
-    def get_batch_tickers(symbols: List[str]) -> Dict[str, Dict]:
-        """Get 24h tickers for many symbols.
-        v5: uses the batched /ticker/price endpoint (weight 2-4 total)
-        instead of the full-market /ticker/24hr call (weight 80).
+    def get_batch_tickers(symbols: List[str],
+                          priority: bool = False) -> Dict[str, Dict]:
+        """Get latest prices for many symbols.
+
+        v5.10 fallback chain (was: full-market /ticker/24hr = weight 80!):
+          1. batched /ticker/price?symbols=[...]  -> weight 2-4
+          2. full /ticker/price (ALL symbols)     -> weight 4  (20x cheaper
+             than the old 24hr fallback, still covers every symbol)
+        Both steps run on the priority lane when requested so position
+        monitoring survives a bulk analysis burst.
         """
         if not symbols:
             return {}
         try:
-            return binance_client.get_tickers_batch(symbols)
+            return binance_client.get_tickers_batch(symbols, priority=priority)
         except Exception as e:
-            log.warning(f"Batch ticker fetch failed ({e}) - falling back to full market")
-        all_t = binance_client.get_all_tickers()
+            log.warning(
+                f"Batch ticker fetch failed ({e}) - "
+                f"falling back to full price list (weight 4)")
+        all_p = binance_client.get_all_prices(priority=True)
         sym_set = set(symbols)
-        return {t["symbol"]: t for t in all_t if t["symbol"] in sym_set}
+        return {t["symbol"]: t for t in all_p if t["symbol"] in sym_set}
+
+    # ---- v5.10: last-known prices (serves the dashboard when even the
+    # fallback cannot run - e.g. shared-IP pressure cooldown) ----
+    _LAST_PRICES: Dict[str, tuple] = {}  # symbol -> (time.time(), price)
 
     @staticmethod
-    def get_batch_prices(symbols: List[str]) -> Dict[str, float]:
-        """v5: {symbol: lastPrice} for a symbol list - 1 request, weight 2-4."""
+    def get_batch_prices(symbols: List[str],
+                         priority: bool = False) -> Dict[str, float]:
+        """v5: {symbol: lastPrice} for a symbol list - 1 request, weight 2-4.
+
+        v5.10: successful results are remembered in a last-known cache so
+        the dashboard can still show P&L (slightly stale, clearly logged)
+        during rate-limit cooldowns instead of showing nothing.
+        """
         out = {}
-        for sym, t in DataFetcher.get_batch_tickers(symbols).items():
+        for sym, t in DataFetcher.get_batch_tickers(symbols, priority=priority).items():
             try:
-                out[sym] = float(t.get("lastPrice", t.get("price", 0)))
+                price = float(t.get("lastPrice", t.get("price", 0)))
             except (TypeError, ValueError):
                 continue
+            if price > 0:
+                out[sym] = price
+                DataFetcher._LAST_PRICES[sym] = (time.time(), price)
+        return out
+
+    @staticmethod
+    def get_last_known_prices(symbols: List[str],
+                              max_age_s: float = 900.0) -> Dict[str, float]:
+        """v5.10: last successfully fetched prices, filtered by freshness."""
+        now = time.time()
+        out = {}
+        for sym in set(symbols):
+            entry = DataFetcher._LAST_PRICES.get(sym)
+            if entry and (now - entry[0]) <= max_age_s:
+                out[sym] = entry[1]
         return out
 
 

@@ -329,6 +329,12 @@ class Settings:
     # re-notification cooldown so the same setup is not re-explained.
     AI_ADVISOR_CACHE_HOURS: float = float(os.getenv("AI_ADVISOR_CACHE_HOURS", "4"))
 
+    # --- v5.10 rate-limiter priority lane ---
+    # The last N weight units of RATE_LIMIT_BUDGET_PER_MIN are reserved for
+    # PRIORITY requests (position watch, dashboard P&L, pending fills) so a
+    # bulk analysis burst can never starve open-position monitoring.
+    RATE_PRIORITY_RESERVE: float = float(os.getenv("RATE_PRIORITY_RESERVE", "200"))
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "data/logs/bot.log")
