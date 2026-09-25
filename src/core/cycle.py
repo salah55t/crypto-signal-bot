@@ -17,6 +17,7 @@ v4.1 gates). This module unifies everything:
 
 Both run_bot.py and the web app now delegate here.
 """
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -76,6 +77,63 @@ def _save_closed_trades(closed: list):
         log.error(f"Failed to save closed trades: {e}")
 
 
+def _autopsy_lines(c: Dict) -> List[str]:
+    """v5.11 trade autopsy - the numbers a veteran asks about after a close.
+
+    Rendered in the Telegram close card AND fed to the AI lesson:
+    whole-trade P&L (partials included), how far the price travelled in our
+    favour (MFE), how deep it hurt (MAE), and how much of the peak we kept.
+    """
+    lines = []
+    total = c.get("total_pnl")
+    if total is not None and abs(float(total) - float(c.get("pnl", 0) or 0)) > 1e-9:
+        lines.append(
+            f"إجمالي الصفقة (شامل جني TP1): ${float(total):+.2f} "
+            f"({float(c.get('total_pnl_pct', 0) or 0):+.2f}%)"
+        )
+    if c.get("mfe_pct"):
+        lines.append(f"أعلى ربح مرّ به السعر: +{float(c['mfe_pct']):.2f}%")
+    if c.get("mae_pct"):
+        lines.append(f"أعمق تراجع: -{float(c['mae_pct']):.2f}%")
+    if c.get("capture_efficiency") is not None:
+        lines.append(
+            f"كفاءة التقاط القمة: {float(c['capture_efficiency']):.0f}%")
+    if c.get("duration_hours") is not None:
+        lines.append(f"مدة الصفقة: {float(c['duration_hours']):.1f} ساعة")
+    if c.get("partials_count"):
+        lines.append(f"جني جزئي TP1: {int(c['partials_count'])} مرة")
+    if c.get("risk_updates_count"):
+        lines.append(f"تعديلات وقف/هدف: {int(c['risk_updates_count'])}")
+    return lines
+
+
+def _send_ai_lesson_async(c: Dict):
+    """v5.11 creative move: an AI post-mortem lesson for every closed trade.
+
+    Deliberately OFF the critical path - a daemon thread calls the LLM and
+    sends the lesson as a follow-up Telegram message, so a slow model can
+    never delay SL/TP checks. Any failure = no lesson, silently.
+    """
+    if not telegram_notifier.enabled:
+        return
+
+    def _work():
+        try:
+            from src.ai import ai_advisor
+            lesson = ai_advisor.trade_postmortem(c)
+            if lesson:
+                telegram_notifier.send_alert(
+                    f"درس الصفقة 🧠 {c.get('symbol', '')}",
+                    lesson,
+                )
+        except Exception as e:
+            log.debug(f"AI lesson skipped: {e}")
+
+    threading.Thread(
+        target=_work, daemon=True,
+        name=f"ai-lesson-{c.get('symbol', 'x')}").start()
+
+
 def _notify_closed(closed: list):
     for c in closed:
         if not telegram_notifier.enabled:
@@ -85,19 +143,27 @@ def _notify_closed(closed: list):
                 f"جني جزئي TP1 🎯 {c.get('symbol', '')}",
                 f"تم تحقيق {c.get('fraction', 0)*100:.0f}% من الصفقة عند {c.get('exit_price')}\n"
                 f"الربح/الخسارة: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
+                f"المحقق تراكمياً: ${c.get('realized_pnl', 0):+.2f}\n"
                 f"الكمية المتبقية تستهدف TP2 ووقفها عند نقطة التعادل"
             )
             continue
-        win_emoji = "✅" if c.get("pnl", 0) > 0 else "❌"
-        telegram_notifier.send_alert(
-            f"إغلاق صفقة {win_emoji}",
+        win_emoji = "✅" if c.get("total_pnl", c.get("pnl", 0)) > 0 else "❌"
+        autopsy = _autopsy_lines(c)
+        body = (
             f"العملة: {c.get('symbol')}\n"
             f"الدخول: {c.get('entry_price')}\n"
             f"الخروج: {c.get('exit_price')}\n"
-            f"الربح/الخسارة: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
+            f"ربح هذا الجزء: ${c.get('pnl', 0):+.2f} ({c.get('pnl_pct', 0):+.2f}%)\n"
+        )
+        if autopsy:
+            body += "\n".join(autopsy) + "\n"
+        body += (
             f"السبب: {tr(c.get('reason', ''))}\n"
             f"الوضع: {ar_mode('PAPER' if c.get('paper', True) else 'LIVE')}"
         )
+        telegram_notifier.send_alert(f"إغلاق صفقة {win_emoji}", body)
+        # v5.11: the AI lesson arrives seconds later as its own message
+        _send_ai_lesson_async(c)
 
 
 def _notify_updates(updates: list, tag: str = ""):

@@ -330,6 +330,9 @@ function renderPositions(positions) {
           <div><span class="label">📍 الدخول</span><br><span class="value">${fmtPrice(p.entry_price)}</span></div>
           <div><span class="label">📏 الحجم</span><br><span class="value">${(p.size || 0).toFixed(6)} ($${(p.notional_usd || 0).toFixed(2)})</span></div>
           <div><span class="label">💸 الرسوم</span><br><span class="value" style="color: var(--red);">${totalFees}</span></div>
+          ${(p.realized_pnl || 0) !== 0 || p.partials_taken ? `
+          <div><span class="label">🏦 محقق سابقاً (TP1)</span><br><span class="value ${(p.realized_pnl || 0) >= 0 ? 'green' : 'red'}">$${(p.realized_pnl || 0).toFixed(4)}</span></div>
+          <div><span class="label">🧾 إجمالي الصفقة</span><br><span class="value ${(p.total_pnl || 0) >= 0 ? 'green' : 'red'}">${fmtPct(p.total_pnl_pct || 0)} ($${(p.total_pnl || 0).toFixed(4)})</span></div>` : ''}
         </div>
         ${progressBar}
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; font-size: 11px; margin-top: 8px; color: var(--text-muted);">
@@ -375,18 +378,24 @@ function renderClosedTrades(trades) {
   // Show most recent first
   const sorted = [...trades].reverse();
   $closedTrades.innerHTML = sorted.map(t => {
-    const win = (t.pnl || 0) >= 0;
+    // v5.11: prefer the WHOLE-trade result (partials + final chunk)
+    const totalPnl = t.total_pnl != null ? t.total_pnl : (t.pnl || 0);
+    const totalPct = t.total_pnl_pct != null ? t.total_pnl_pct : t.pnl_pct;
+    const win = totalPnl >= 0;
     const pnlClass = win ? 'win' : 'loss';
     const exitTime = t.exit_time ? new Date(t.exit_time).toLocaleString('ar') : '—';
+    const partialTag = t.partial_count ? `<span title="جني جزئي TP1">🔁 ${t.partial_count}</span>` : '';
+    const uidTag = t.trade_uid ? `<span style="color: var(--text-muted); font-family: monospace; font-size: 10px;">${t.trade_uid}</span>` : '';
     return `
       <div class="closed-row ${win ? 'win' : 'loss'}">
-        <span class="p-symbol">${t.symbol}</span>
+        <span class="p-symbol">${t.symbol} ${uidTag}</span>
         <span>${t.paper ? 'ورقي' : '🔴'}</span>
         <span>دخول: ${fmtPrice(t.entry_price)}</span>
         <span>خروج: ${fmtPrice(t.exit_price)}</span>
-        <span class="closed-pnl ${pnlClass}">${fmtPct(t.pnl_pct)}<br><small>$${(t.pnl || 0).toFixed(2)}</small></span>
+        ${partialTag}
+        <span class="closed-pnl ${pnlClass}">${fmtPct(totalPct || 0)}<br><small>$${totalPnl.toFixed(2)}${t.total_pnl != null ? ' (كامل)' : ''}</small></span>
         <span>${exitTime}</span>
-        <span style="color: var(--text-muted)">${escapeHtml(t.reason || '')}</span>
+        <span style="color: var(--text-muted)">${escapeHtml(t.reason || t.close_reason || '')}</span>
       </div>
     `;
   }).join('');
@@ -470,17 +479,75 @@ async function fetchBottomCandidates() {
 // ============================================================
 async function fetchStats() {
   try {
-    const [summary, strategies, runs] = await Promise.all([
+    const [summary, strategies, runs, performance, equity] = await Promise.all([
       fetch(`${API}/stats/summary`).then(r => r.json()),
       fetch(`${API}/stats/strategies?days=30`).then(r => r.json()),
       fetch(`${API}/stats/runs?limit=10`).then(r => r.json()),
+      // v5.11: whole-trade analytics from the persistent ledger
+      fetch(`${API}/stats/performance?days=90`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/stats/equity`).then(r => r.json()).catch(() => null),
     ]);
     renderStatsSummary(summary);
     renderStrategyStats(strategies.strategies || []);
     renderRunsHistory(runs.runs || []);
+    if (performance) renderPerformance(performance);
+    if (equity) renderEquityCurve(equity.points || []);
   } catch (e) {
     console.error('Stats fetch error:', e);
   }
+}
+
+// v5.11: trade-ledger performance analytics panel
+function renderPerformance(p) {
+  if (!p || p.error || !p.closed_trades) {
+    const $pf = document.getElementById('perfPF');
+    if ($pf) $pf.textContent = '—';
+    return;
+  }
+  const set = (id, val, color) => {
+    const $el = document.getElementById(id);
+    if (!$el) return;
+    $el.textContent = val;
+    if (color) $el.style.color = color;
+  };
+  set('perfWinRate', `${(p.win_rate || 0).toFixed(1)}%`,
+      p.win_rate >= 50 ? 'var(--green)' : 'var(--red)');
+  const pf = p.profit_factor || 0;
+  set('perfPF', pf ? pf.toFixed(2) : '—',
+      pf >= 1.5 ? 'var(--green)' : pf >= 1 ? 'var(--yellow)' : 'var(--red)');
+  set('perfExpectancy', `$${(p.expectancy || 0).toFixed(3)}`,
+      (p.expectancy || 0) >= 0 ? 'var(--green)' : 'var(--red)');
+  set('perfCapture', p.avg_capture_efficiency != null ? `${p.avg_capture_efficiency.toFixed(0)}%` : '—');
+  set('perfMAE', `-${(p.avg_mae_pct || 0).toFixed(2)}%`, 'var(--red)');
+  set('perfHold', `${(p.avg_hold_hours || 0).toFixed(1)} ساعة`);
+}
+
+// v5.11: cumulative realized-PnL sparkline (SVG)
+function renderEquityCurve(points) {
+  const $el = document.getElementById('equityCurve');
+  if (!$el) return;
+  if (!points || points.length < 2) {
+    $el.innerHTML = '<div class="empty">لا توجد صفقات مغلقة كفاية لرسم المنحنى.</div>';
+    return;
+  }
+  const w = 800, h = 120, pad = 6;
+  const vals = points.map(p => p.cum_pnl);
+  const min = Math.min(...vals, 0);
+  const max = Math.max(...vals, 0.0000001);
+  const xs = i => pad + i * (w - 2 * pad) / (points.length - 1);
+  const ys = v => h - pad - (v - min) * (h - 2 * pad) / ((max - min) || 1);
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${xs(i).toFixed(1)},${ys(p.cum_pnl).toFixed(1)}`).join(' ');
+  const last = vals[vals.length - 1];
+  const color = last >= 0 ? 'var(--green)' : 'var(--red)';
+  $el.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:120px;display:block;" preserveAspectRatio="none">
+      <line x1="0" y1="${ys(0).toFixed(1)}" x2="${w}" y2="${ys(0).toFixed(1)}" stroke="rgba(255,255,255,0.15)" stroke-dasharray="4 4"/>
+      <path d="${path}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+      الرصيد التراكمي المحقق: <span style="color:${color};font-weight:700;">$${last.toFixed(2)}</span>
+      من ${points.length} صفقة مغلقة
+    </div>`;
 }
 
 function renderStatsSummary(s) {

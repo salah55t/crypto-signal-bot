@@ -147,6 +147,14 @@ class Settings:
     # Min unrealized profit (%) before a continuation TP-extension may fire
     CONTINUATION_MIN_PROFIT_PCT: float = float(
         os.getenv("CONTINUATION_MIN_PROFIT_PCT", "1.0"))
+
+    # --- v5.11 Persistent Trade Ledger (entry prices live in the DB) ---
+    # Every open/partial/level-update/close is mirrored into the positions
+    # table + trade_events audit trail. On startup the JSON working set is
+    # reconciled with the ledger in BOTH directions, so a wiped disk
+    # (Render redeploy) can no longer erase entry prices or updated levels.
+    TRADE_LEDGER_RESTORE: bool = os.getenv(
+        "TRADE_LEDGER_RESTORE", "true").lower() == "true"
     # Fraction of the CURRENT profit to lock into the SL on continuation
     # (0.5 = trade up +3% -> SL to at least +1.5%; ladder may raise it more)
     PROFIT_LOCK_FRACTION: float = float(os.getenv("PROFIT_LOCK_FRACTION", "0.5"))

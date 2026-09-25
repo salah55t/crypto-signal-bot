@@ -343,10 +343,54 @@ async def get_all_analyses():
 
 @app.get("/api/closed-trades")
 async def get_closed_trades():
-    """Return closed positions history with P&L."""
-    # Closed trades are stored in daily_stats or a separate file
+    """Return closed positions history with P&L.
+
+    v5.11: served from the persistent ledger when available - rows carry
+    total_pnl (partials + final chunk) so the dashboard shows the WHOLE
+    trade result, not just the last chunk. Falls back to the JSON file.
+    """
+    try:
+        from src.db.database import db as _db
+        rows = _db.get_positions_history(closed_only=True, limit=100)
+        if rows:
+            return rows
+    except Exception as e:
+        log.debug(f"Closed trades from DB unavailable: {e}")
     closed_file = DATA_DIR / "closed_trades.json"
     return load_json(closed_file, default=[])
+
+
+@app.get("/api/stats/performance")
+async def get_performance(days: int = 90):
+    """v5.11: whole-trade performance analytics (win rate, profit factor,
+    expectancy, MFE/MAE quality, capture efficiency, hold time)."""
+    try:
+        from src.db.database import db as _db
+        return _db.get_performance_stats(days=max(1, min(days, 365)))
+    except Exception as e:
+        return {"error": str(e), "closed_trades": 0, "window_days": days}
+
+
+@app.get("/api/stats/equity")
+async def get_equity(limit: int = 200):
+    """v5.11: cumulative realized-PnL curve over closed trades."""
+    try:
+        from src.db.database import db as _db
+        return {"points": _db.get_equity_curve(limit=max(10, min(limit, 500)))}
+    except Exception as e:
+        return {"error": str(e), "points": []}
+
+
+@app.get("/api/trades/{trade_uid}/events")
+async def get_trade_timeline(trade_uid: str):
+    """v5.11: full audit timeline of one trade (OPEN -> every SL/TP update
+    -> TP1 partial -> CLOSE) straight from the trade_events ledger."""
+    try:
+        from src.db.database import db as _db
+        events = _db.get_trade_events(trade_uid, limit=300)
+        return {"trade_uid": trade_uid, "events": events}
+    except Exception as e:
+        return {"error": str(e), "trade_uid": trade_uid, "events": []}
 
 
 @app.get("/api/bottom-candidates")

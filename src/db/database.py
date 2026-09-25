@@ -23,7 +23,7 @@ import time
 import sqlite3
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config.settings import PROJECT_ROOT
 from src.utils.logger import log
 
@@ -104,7 +104,42 @@ CREATE TABLE IF NOT EXISTS positions (
     oco_order_id TEXT,
     close_reason TEXT,
     risk_updates_count INTEGER DEFAULT 0,
-    risk_updates TEXT
+    risk_updates TEXT,
+    -- v5.11 persistent trade ledger
+    trade_uid TEXT,
+    status TEXT,
+    initial_sl REAL,
+    initial_tp REAL,
+    tp2 REAL,
+    initial_notional REAL,
+    strategy TEXT,
+    realized_pnl REAL,
+    partial_count INTEGER,
+    tp1_taken INTEGER,
+    peak_price REAL,
+    trough_price REAL,
+    mfe_pct REAL,
+    mae_pct REAL,
+    entry_fee REAL,
+    exit_fee REAL,
+    total_pnl REAL,
+    total_pnl_pct REAL,
+    updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS trade_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uid TEXT,
+    symbol TEXT,
+    event_time TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    old_sl REAL,
+    new_sl REAL,
+    old_tp REAL,
+    new_tp REAL,
+    price REAL,
+    pnl REAL,
+    pnl_pct REAL,
+    reason TEXT
 );
 CREATE TABLE IF NOT EXISTS daily_stats (
     date TEXT PRIMARY KEY,
@@ -132,6 +167,9 @@ CREATE INDEX IF NOT EXISTS idx_rec_timestamp ON recommendations(timestamp);
 CREATE INDEX IF NOT EXISTS idx_rec_symbol ON recommendations(symbol);
 CREATE INDEX IF NOT EXISTS idx_pos_symbol ON positions(symbol);
 CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(exit_time);
+-- NOTE: idx_pos_uid / idx_events_uid are created by _migrate() AFTER the
+-- ledger columns exist (they must not run before the ALTER TABLEs on
+-- pre-v5.11 databases).
 CREATE INDEX IF NOT EXISTS idx_signals_strategy ON strategy_signals(strategy_name);
 CREATE INDEX IF NOT EXISTS idx_bottom_timestamp ON bottom_candidates(timestamp);
 """
@@ -196,7 +234,42 @@ CREATE TABLE IF NOT EXISTS positions (
     oco_order_id TEXT,
     close_reason TEXT,
     risk_updates_count INTEGER DEFAULT 0,
-    risk_updates TEXT
+    risk_updates TEXT,
+    -- v5.11 persistent trade ledger
+    trade_uid TEXT,
+    status TEXT,
+    initial_sl REAL,
+    initial_tp REAL,
+    tp2 REAL,
+    initial_notional REAL,
+    strategy TEXT,
+    realized_pnl REAL,
+    partial_count INTEGER,
+    tp1_taken INTEGER,
+    peak_price REAL,
+    trough_price REAL,
+    mfe_pct REAL,
+    mae_pct REAL,
+    entry_fee REAL,
+    exit_fee REAL,
+    total_pnl REAL,
+    total_pnl_pct REAL,
+    updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS trade_events (
+    id SERIAL PRIMARY KEY,
+    trade_uid TEXT,
+    symbol TEXT,
+    event_time TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    old_sl REAL,
+    new_sl REAL,
+    old_tp REAL,
+    new_tp REAL,
+    price REAL,
+    pnl REAL,
+    pnl_pct REAL,
+    reason TEXT
 );
 CREATE TABLE IF NOT EXISTS daily_stats (
     date TEXT PRIMARY KEY,
@@ -224,8 +297,60 @@ CREATE INDEX IF NOT EXISTS idx_rec_timestamp ON recommendations(timestamp);
 CREATE INDEX IF NOT EXISTS idx_rec_symbol ON recommendations(symbol);
 CREATE INDEX IF NOT EXISTS idx_pos_symbol ON positions(symbol);
 CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(exit_time);
+-- NOTE: idx_pos_uid / idx_events_uid are created by _migrate() AFTER the
+-- ledger columns exist (they must not run before the ALTER TABLEs on
+-- pre-v5.11 databases).
 CREATE INDEX IF NOT EXISTS idx_signals_strategy ON strategy_signals(strategy_name);
 CREATE INDEX IF NOT EXISTS idx_bottom_timestamp ON bottom_candidates(timestamp);
+"""
+
+
+# v5.11: idempotent column migration for EXISTING databases (fresh installs
+# already get the columns from the schema above).
+LEDGER_COLUMNS = {
+    "trade_uid": "TEXT",
+    "status": "TEXT",
+    "initial_sl": "REAL",
+    "initial_tp": "REAL",
+    "tp2": "REAL",
+    "initial_notional": "REAL",
+    "strategy": "TEXT",
+    "realized_pnl": "REAL",
+    "partial_count": "INTEGER",
+    "tp1_taken": "INTEGER",
+    "peak_price": "REAL",
+    "trough_price": "REAL",
+    "mfe_pct": "REAL",
+    "mae_pct": "REAL",
+    "entry_fee": "REAL",
+    "exit_fee": "REAL",
+    "total_pnl": "REAL",
+    "total_pnl_pct": "REAL",
+    "updated_at": "TEXT",
+}
+
+TRADE_EVENTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS trade_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uid TEXT,
+    symbol TEXT,
+    event_time TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    old_sl REAL, new_sl REAL, old_tp REAL, new_tp REAL,
+    price REAL, pnl REAL, pnl_pct REAL, reason TEXT
+)
+"""
+
+TRADE_EVENTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS trade_events (
+    id SERIAL PRIMARY KEY,
+    trade_uid TEXT,
+    symbol TEXT,
+    event_time TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    old_sl REAL, new_sl REAL, old_tp REAL, new_tp REAL,
+    price REAL, pnl REAL, pnl_pct REAL, reason TEXT
+)
 """
 
 
@@ -272,6 +397,7 @@ class Database:
                         cur.execute(SCHEMA_POSTGRES)
                         conn.commit()
                     self._initialized = True
+                    self._migrate()
                     log.info("[green]Database initialized[/] (PostgreSQL) "
                              f"after {attempt + 1} attempt(s)")
                     return
@@ -293,9 +419,71 @@ class Database:
                 conn.executescript(SCHEMA_SQLITE)
                 conn.commit()
             self._initialized = True
+            self._migrate()
             log.info(f"[green]Database initialized[/] (SQLite): {self.db_path}")
         except Exception as e:
             log.error(f"SQLite init failed: {e}")
+
+    def _migrate(self):
+        """v5.11 persistent trade ledger migration (idempotent).
+
+        - Adds the ledger columns to an existing `positions` table
+        - Creates the append-only `trade_events` audit table
+        - Backfills status for legacy rows (exit_time IS NOT NULL -> closed)
+        Runs on BOTH dialects after a successful schema init.
+        """
+        try:
+            with self._connect() as conn:
+                cur = conn.cursor()
+                # existing columns of `positions`
+                if self.use_postgres:
+                    cur.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'positions'"
+                    )
+                    cols = {r[0] for r in cur.fetchall()}
+                else:
+                    cur.execute("PRAGMA table_info(positions)")
+                    cols = {r[1] for r in cur.fetchall()}
+                added = []
+                for col, typ in LEDGER_COLUMNS.items():
+                    if col not in cols:
+                        cur.execute(
+                            f"ALTER TABLE positions ADD COLUMN {col} {typ}"
+                        )
+                        added.append(col)
+                # trade_events audit table + indexes
+                cur.execute(
+                    TRADE_EVENTS_DDL_PG if self.use_postgres
+                    else TRADE_EVENTS_DDL_SQLITE
+                )
+                for idx_sql in (
+                    "CREATE INDEX IF NOT EXISTS idx_pos_uid ON positions(trade_uid)",
+                    "CREATE INDEX IF NOT EXISTS idx_events_uid ON trade_events(trade_uid)",
+                ):
+                    try:
+                        cur.execute(idx_sql)
+                    except Exception:
+                        pass  # PG re-run: index may already exist
+                # backfill status for legacy rows
+                cur.execute(
+                    f"UPDATE positions SET status = 'closed' "
+                    f"WHERE status IS NULL AND exit_time IS NOT NULL"
+                )
+                cur.execute(
+                    f"UPDATE positions SET status = 'open' "
+                    f"WHERE status IS NULL"
+                )
+                conn.commit()
+            if added:
+                log.info(
+                    f"[green]Trade-ledger migration[/]: +{len(added)} "
+                    f"column(s) on positions ({', '.join(added[:6])}"
+                    f"{'...' if len(added) > 6 else ''})"
+                )
+        except Exception as e:
+            # Never kill the bot over a migration issue - log and continue.
+            log.warning(f"Ledger migration skipped: {e}")
 
     def _connect(self):
         """Get a database connection (re-attempts Postgres init lazily)."""
@@ -456,7 +644,12 @@ class Database:
             return rec_id
 
     def log_position_opened(self, position: Dict) -> int:
-        """Log when a position is opened. Returns the position ID."""
+        """Log when a position is opened. Returns the position ID.
+
+        v5.11: also writes the persistent-ledger columns (trade_uid, initial
+        SL/TP, status='open', ...) so entry prices survive restarts/redeploys
+        even when the ephemeral JSON file is lost.
+        """
         placeholder = "%s" if self.use_postgres else "?"
         with self._connect() as conn:
             cur = conn.cursor()
@@ -464,27 +657,79 @@ class Database:
                 INSERT INTO positions
                     (symbol, direction, entry_price, stop_loss, take_profit,
                      size, notional_usd, entry_time, confidence, paper,
-                     buy_order_id, oco_order_id, risk_updates_count, risk_updates)
+                     buy_order_id, oco_order_id, risk_updates_count, risk_updates,
+                     trade_uid, status, initial_sl, initial_tp, tp2,
+                     initial_notional, strategy, entry_fee,
+                     peak_price, trough_price, mfe_pct, mae_pct,
+                     realized_pnl, partial_count, tp1_taken)
                 VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder},
                         {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder},
-                        {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder})
             """
-            if self.use_postgres:
-                sql += " RETURNING id"
-            cur.execute(sql, (
+            entry_price = position.get("entry_price")
+            entry = entry_price if isinstance(entry_price, (int, float)) else 0
+            sl = position.get("stop_loss")
+            tp = position.get("take_profit")
+            params = (
                 position.get("symbol"), position.get("direction"),
-                position.get("entry_price"), position.get("stop_loss"),
-                position.get("take_profit"), position.get("size", 0),
+                entry_price, sl,
+                tp, position.get("size", 0),
                 position.get("notional_usd", 0),
                 position.get("entry_time"), position.get("confidence", 0),
                 1 if position.get("paper", True) else 0,
                 position.get("buy_order_id"), position.get("oco_order_id"),
                 len(position.get("risk_updates", [])),
-                json.dumps(position.get("risk_updates", []), default=str)
-            ))
+                json.dumps(position.get("risk_updates", []), default=str),
+                # v5.11 ledger columns
+                position.get("trade_uid"),
+                "open",
+                sl, tp,
+                position.get("take_profit_2") or tp,
+                position.get("initial_notional_usd", position.get("notional_usd", 0)),
+                position.get("strategy"),
+                position.get("entry_fee", 0),
+                position.get("peak_price", entry) or entry,
+                position.get("trough_price", entry) or entry,
+                position.get("mfe_pct", 0.0),
+                position.get("mae_pct", 0.0),
+                0.0, 0, 0,
+            )
+            if self.use_postgres:
+                sql += " RETURNING id"
+            cur.execute(sql, params)
             pos_id = cur.fetchone()[0] if self.use_postgres else cur.lastrowid
+            # append the OPEN event to the audit trail
+            self._insert_trade_event(cur, {
+                "trade_uid": position.get("trade_uid"),
+                "symbol": position.get("symbol"),
+                "event_time": position.get("entry_time"),
+                "event_type": "OPEN",
+                "new_sl": sl, "new_tp": tp,
+                "price": entry_price,
+                "reason": "position opened",
+            })
             conn.commit()
             return pos_id
+
+    def _insert_trade_event(self, cur, ev: Dict):
+        """Append one row to the trade_events audit table (no commit here)."""
+        placeholder = "%s" if self.use_postgres else "?"
+        cur.execute(
+            f"""INSERT INTO trade_events
+                (trade_uid, symbol, event_time, event_type,
+                 old_sl, new_sl, old_tp, new_tp, price, pnl, pnl_pct, reason)
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder})""",
+            (ev.get("trade_uid"), ev.get("symbol"), ev.get("event_time"),
+             ev.get("event_type"), ev.get("old_sl"), ev.get("new_sl"),
+             ev.get("old_tp"), ev.get("new_tp"), ev.get("price"),
+             ev.get("pnl"), ev.get("pnl_pct"), ev.get("reason"))
+        )
 
     def log_position_closed(self, symbol: str, entry_time: str, exit_price: float,
                               exit_time: str, pnl: float, pnl_pct: float,
@@ -515,6 +760,271 @@ class Database:
                 (updates_count, updates_json, symbol, entry_time)
             )
             conn.commit()
+
+    # ============================================
+    # v5.11 PERSISTENT TRADE LEDGER
+    # The DB is the source of truth for entry prices and SL/TP levels.
+    # Every level change appends a trade_events row (audit trail).
+    # ============================================
+
+    @staticmethod
+    def _uid_where(placeholder: str, trade_uid: str = None,
+                   symbol: str = None, entry_time: str = None):
+        """WHERE clause matching by trade_uid, falling back to the legacy
+        (symbol, entry_time) pair for pre-v5.11 rows."""
+        if trade_uid:
+            return f"WHERE trade_uid = {placeholder}", (trade_uid,)
+        return (f"WHERE symbol = {placeholder} AND entry_time = {placeholder} "
+                f"AND (trade_uid IS NULL OR trade_uid = '')",
+                (symbol, entry_time))
+
+    def attach_trade_uid(self, symbol: str, entry_time: str,
+                         trade_uid: str) -> int:
+        """Tag an existing (pre-v5.11) row with a trade_uid. Returns rowcount."""
+        placeholder = "%s" if self.use_postgres else "?"
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""UPDATE positions SET trade_uid = {placeholder},
+                    status = COALESCE(status, 'open')
+                    WHERE symbol = {placeholder} AND entry_time = {placeholder}
+                    AND (trade_uid IS NULL OR trade_uid = '')""",
+                (trade_uid, symbol, entry_time)
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def update_position_levels(self, trade_uid: str = None, symbol: str = None,
+                               entry_time: str = None, stop_loss: float = None,
+                               take_profit: float = None, old_sl: float = None,
+                               old_tp: float = None, price: float = None,
+                               reason: str = "", event_type: str = "RISK_UPDATE",
+                               peak_price: float = None, trough_price: float = None,
+                               mfe_pct: float = None, mae_pct: float = None,
+                               notional_usd: float = None, size: float = None,
+                               tp1_taken: bool = None):
+        """v5.11: persist current SL/TP (+ excursion snapshot) to the DB and
+        append a trade_events audit row. Called on EVERY SL/TP update."""
+        placeholder = "%s" if self.use_postgres else "?"
+        where, params_w = self._uid_where(placeholder, trade_uid, symbol, entry_time)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""UPDATE positions SET
+                    stop_loss = COALESCE({placeholder}, stop_loss),
+                    take_profit = COALESCE({placeholder}, take_profit),
+                    peak_price = COALESCE({placeholder}, peak_price),
+                    trough_price = COALESCE({placeholder}, trough_price),
+                    mfe_pct = COALESCE({placeholder}, mfe_pct),
+                    mae_pct = COALESCE({placeholder}, mae_pct),
+                    notional_usd = COALESCE({placeholder}, notional_usd),
+                    size = COALESCE({placeholder}, size),
+                    tp1_taken = COALESCE({placeholder}, tp1_taken),
+                    updated_at = {placeholder}
+                    {where}""",
+                (stop_loss, take_profit, peak_price, trough_price,
+                 mfe_pct, mae_pct, notional_usd, size,
+                 None if tp1_taken is None else (1 if tp1_taken else 0),
+                 now, *params_w)
+            )
+            self._insert_trade_event(cur, {
+                "trade_uid": trade_uid, "symbol": symbol,
+                "event_time": now, "event_type": event_type,
+                "old_sl": old_sl, "new_sl": stop_loss,
+                "old_tp": old_tp, "new_tp": take_profit,
+                "price": price, "reason": reason,
+            })
+            conn.commit()
+
+    def record_partial_close(self, trade_uid: str = None, symbol: str = None,
+                             entry_time: str = None, remaining_notional: float = 0,
+                             remaining_size: float = 0, realized_total: float = 0,
+                             partial_count: int = 0, tp1_taken: bool = False,
+                             stop_loss: float = None, take_profit: float = None,
+                             exit_price: float = 0, exit_time: str = "",
+                             chunk_pnl: float = 0, chunk_pnl_pct: float = 0,
+                             fraction: float = 0, reason: str = ""):
+        """v5.11 fix: a PARTIAL (TP1) close no longer pretends the trade is
+        closed. It ACCUMULATES realized_pnl, syncs the remaining notional and
+        the new SL/TP levels, and appends a TP1_PARTIAL event. The legacy
+        path overwrote the row's pnl/exit_time - the TP1 profit was erased
+        by the final close and stats were wrong."""
+        placeholder = "%s" if self.use_postgres else "?"
+        where, params_w = self._uid_where(placeholder, trade_uid, symbol, entry_time)
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""UPDATE positions SET
+                    notional_usd = {placeholder},
+                    size = {placeholder},
+                    realized_pnl = {placeholder},
+                    partial_count = {placeholder},
+                    tp1_taken = {placeholder},
+                    stop_loss = COALESCE({placeholder}, stop_loss),
+                    take_profit = COALESCE({placeholder}, take_profit),
+                    risk_updates_count = COALESCE(risk_updates_count, 0) + 1,
+                    updated_at = {placeholder}
+                    {where}""",
+                (remaining_notional, remaining_size, realized_total,
+                 partial_count, 1 if tp1_taken else 0,
+                 stop_loss, take_profit, exit_time, *params_w)
+            )
+            self._insert_trade_event(cur, {
+                "trade_uid": trade_uid, "symbol": symbol,
+                "event_time": exit_time, "event_type": "TP1_PARTIAL",
+                "old_sl": None, "new_sl": stop_loss,
+                "old_tp": None, "new_tp": take_profit,
+                "price": exit_price, "pnl": chunk_pnl,
+                "pnl_pct": chunk_pnl_pct,
+                "reason": f"{fraction*100:.0f}% closed - {reason}",
+            })
+            conn.commit()
+
+    def close_trade(self, trade_uid: str = None, symbol: str = None,
+                    entry_time: str = None, exit_price: float = 0,
+                    exit_time: str = "", final_pnl: float = 0,
+                    final_pnl_pct: float = 0, total_pnl: float = None,
+                    total_pnl_pct: float = None, close_reason: str = "",
+                    exit_fee: float = None, peak_price: float = None,
+                    trough_price: float = None, mfe_pct: float = None,
+                    mae_pct: float = None):
+        """v5.11: close a trade by trade_uid and store the WHOLE-trade result:
+        pnl = final chunk, total_pnl = partials + final chunk (accurate stats)."""
+        placeholder = "%s" if self.use_postgres else "?"
+        where, params_w = self._uid_where(placeholder, trade_uid, symbol, entry_time)
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""UPDATE positions SET
+                    exit_price = {placeholder}, exit_time = {placeholder},
+                    pnl = {placeholder}, pnl_pct = {placeholder},
+                    close_reason = {placeholder},
+                    exit_fee = COALESCE({placeholder}, exit_fee),
+                    total_pnl = COALESCE({placeholder}, total_pnl),
+                    total_pnl_pct = COALESCE({placeholder}, total_pnl_pct),
+                    peak_price = COALESCE({placeholder}, peak_price),
+                    trough_price = COALESCE({placeholder}, trough_price),
+                    mfe_pct = COALESCE({placeholder}, mfe_pct),
+                    mae_pct = COALESCE({placeholder}, mae_pct),
+                    status = 'closed',
+                    updated_at = {placeholder}
+                    {where}""",
+                (exit_price, exit_time, final_pnl, final_pnl_pct,
+                 close_reason, exit_fee, total_pnl, total_pnl_pct,
+                 peak_price, trough_price, mfe_pct, mae_pct,
+                 exit_time, *params_w)
+            )
+            self._insert_trade_event(cur, {
+                "trade_uid": trade_uid, "symbol": symbol,
+                "event_time": exit_time, "event_type": "CLOSE",
+                "price": exit_price, "pnl": final_pnl,
+                "pnl_pct": final_pnl_pct, "reason": close_reason,
+            })
+            conn.commit()
+            return cur.rowcount
+
+    def get_open_positions(self) -> List[Dict]:
+        """v5.11: open positions straight from the ledger (restore source)."""
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM positions WHERE status = 'open' "
+                "ORDER BY entry_time ASC"
+            )
+            return self._fetch_all(cur)
+
+    def get_trade_events(self, trade_uid: str, limit: int = 200) -> List[Dict]:
+        """Full audit timeline of one trade (oldest first)."""
+        placeholder = "%s" if self.use_postgres else "?"
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT * FROM trade_events WHERE trade_uid = {placeholder} "
+                f"ORDER BY event_time ASC, id ASC LIMIT {placeholder}",
+                (trade_uid, limit)
+            )
+            return self._fetch_all(cur)
+
+    def get_performance_stats(self, days: int = 90) -> Dict:
+        """v5.11 creative layer: whole-trade performance analytics.
+
+        Computed in Python from closed rows so the same code runs on SQLite
+        and PostgreSQL (no dialect-specific date math). Uses total_pnl when
+        available (partials included), falling back to pnl for legacy rows.
+        """
+        rows = self.get_positions_history(closed_only=True, limit=500)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        trades = []
+        for r in rows:
+            exit_time = r.get("exit_time") or ""
+            if exit_time and exit_time < cutoff:
+                continue
+            trades.append(r)
+        if not trades:
+            return {"closed_trades": 0, "window_days": days}
+        pnl_of = lambda r: float(r.get("total_pnl") if r.get("total_pnl") is not None else (r.get("pnl") or 0))
+        wins = [r for r in trades if pnl_of(r) > 0]
+        losses = [r for r in trades if pnl_of(r) <= 0]
+        gross_win = sum(pnl_of(r) for r in wins)
+        gross_loss = -sum(pnl_of(r) for r in losses)
+        net = gross_win - gross_loss
+        mfe_vals = [float(r.get("mfe_pct") or 0) for r in trades]
+        mae_vals = [float(r.get("mae_pct") or 0) for r in trades]
+        durations = []
+        for r in trades:
+            try:
+                d = (datetime.fromisoformat(r["exit_time"])
+                     - datetime.fromisoformat(r["entry_time"]))
+                durations.append(max(0.0, d.total_seconds() / 3600.0))
+            except Exception:
+                pass
+        # capture efficiency: how much of the peak move turned into PnL
+        effs = []
+        for r in trades:
+            mfe = float(r.get("mfe_pct") or 0)
+            if mfe > 0:
+                notional = float(r.get("initial_notional") or r.get("notional_usd") or 0)
+                if notional > 0:
+                    effs.append(min(200.0, max(-200.0, pnl_of(r) / notional * 100 / mfe * 100)))
+        return {
+            "window_days": days,
+            "closed_trades": len(trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": len(wins) / len(trades) * 100,
+            "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else (gross_win if gross_win > 0 else 0),
+            "net_pnl": net,
+            "avg_pnl": net / len(trades),
+            "expectancy": net / len(trades),
+            "avg_win": (gross_win / len(wins)) if wins else 0,
+            "avg_loss": (gross_loss / len(losses)) if losses else 0,
+            "best_pnl": max(pnl_of(r) for r in trades),
+            "worst_pnl": min(pnl_of(r) for r in trades),
+            "avg_mfe_pct": (sum(mfe_vals) / len(mfe_vals)) if mfe_vals else 0,
+            "avg_mae_pct": (sum(mae_vals) / len(mae_vals)) if mae_vals else 0,
+            "avg_capture_efficiency": (sum(effs) / len(effs)) if effs else None,
+            "avg_hold_hours": (sum(durations) / len(durations)) if durations else 0,
+            "partial_closes_total": sum(int(r.get("partial_count") or 0) for r in trades),
+        }
+
+    def get_equity_curve(self, limit: int = 200) -> List[Dict]:
+        """v5.11: cumulative realized PnL over closed trades (dashboard sparkline)."""
+        rows = self.get_positions_history(closed_only=True, limit=limit)
+        rows.sort(key=lambda r: r.get("exit_time") or "")
+        curve, cum = [], 0.0
+        for r in rows:
+            pnl = r.get("total_pnl")
+            if pnl is None:
+                pnl = r.get("pnl") or 0
+            cum += float(pnl)
+            curve.append({
+                "exit_time": r.get("exit_time"),
+                "symbol": r.get("symbol"),
+                "pnl": float(pnl),
+                "cum_pnl": cum,
+            })
+        return curve
 
     def log_bottom_candidate(self, candidate: Dict):
         """Log a bottom candidate."""

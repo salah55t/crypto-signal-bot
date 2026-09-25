@@ -211,6 +211,43 @@
       </div>
 
       <div class="section-title">
+        <h2>🔬 مشرّح الأداء — دفتر الصفقات (v5.11)</h2>
+      </div>
+      <div class="stats-grid" id="perfPanel">
+        <div class="stat-card glass">
+          <span class="stat-label">معدل الفوز (90 يوم)</span>
+          <span class="stat-value" id="perfWinRate">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">عامل الربح Profit Factor</span>
+          <span class="stat-value" id="perfPF">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">التوقع لكل صفقة</span>
+          <span class="stat-value" id="perfExpectancy">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">متوسط التقاط القمة (MFE)</span>
+          <span class="stat-value" id="perfCapture">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">أعلى تراجع متوسط (MAE)</span>
+          <span class="stat-value" id="perfMAE">—</span>
+        </div>
+        <div class="stat-card glass">
+          <span class="stat-label">متوسط مدة الصفقة</span>
+          <span class="stat-value" id="perfHold">—</span>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h2>📈 منحنى الأداء التراكمي</h2>
+      </div>
+      <div class="glass" id="equityCurve" style="padding:12px; border-radius:12px;">
+        <div class="empty">لا توجد صفقات مغلقة كفاية لرسم المنحنى.</div>
+      </div>
+
+      <div class="section-title">
         <h2>🏆 أداء الاستراتيجيات</h2>
       </div>
       <div class="analyses-table glass" id="strategyStats">

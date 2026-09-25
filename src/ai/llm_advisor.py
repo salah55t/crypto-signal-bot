@@ -276,6 +276,66 @@ class LLMAdvisor:
                      f"recommendation(s) got an Arabic AI comment")
         return done
 
+    # ---------------- v5.11: trade autopsy lesson ----------------
+
+    @staticmethod
+    def _postmortem_system_prompt() -> str:
+        return (
+            "أنت مدرب تداول متمرس يراجع صفقات بوت آلي بعد إغلاقها. "
+            "اقرأ حقول الصفقة (سبب الدخول، الربح الأقصى الذي مرّ به السعر، "
+            "التراجع الأعمق، سبب الخروج، المدة، عدد التعديلات) واكتب درساً "
+            "واحداً عملياً بالعربية في جملة إلى جملتين كحد أقصى. "
+            "علّق على إدارة الصفقة فقط (الهدف، الوقف، التوقيت) ولا تتنبأ "
+            "بالمستقبل، ولا تقدم نصائح مالية، ولا تذكر أنك ذكاء اصطناعي. "
+            "اكتب نصاً عادياً بدون أي تنسيق أو رموز خاصة."
+        )
+
+    @staticmethod
+    def _postmortem_user_prompt(t: Dict) -> str:
+        """Facts of the closed trade (whole-trade view incl. partials)."""
+        total_pct = t.get("total_pnl_pct")
+        if total_pct is None:
+            total_pct = t.get("pnl_pct", 0) or 0
+        facts = [
+            f"العملة: {t.get('symbol', '?')}",
+            f"النتيجة الإجمالية: {float(total_pct or 0):+.2f}%",
+        ]
+        if t.get("mfe_pct"):
+            facts.append(f"أعلى ربح مرّ بالسعر: +{float(t['mfe_pct']):.2f}%")
+        if t.get("mae_pct"):
+            facts.append(f"أعمق تراجع: -{float(t['mae_pct']):.2f}%")
+        if t.get("capture_efficiency") is not None:
+            facts.append(
+                f"نسبة التقاط القمة: {float(t['capture_efficiency']):.0f}%")
+        if t.get("duration_hours") is not None:
+            facts.append(f"المدة: {float(t['duration_hours']):.1f} ساعة")
+        if t.get("partials_count"):
+            facts.append(f"جني جزئي TP1: {int(t['partials_count'])} مرة")
+        if t.get("risk_updates_count"):
+            facts.append(f"تعديلات وقف/هدف: {int(t['risk_updates_count'])}")
+        reason = t.get("reason") or t.get("close_reason") or ""
+        if reason:
+            facts.append(f"سبب الخروج: {reason}")
+        return "\n".join(facts)
+
+    def trade_postmortem(self, closed_trade: Dict) -> Optional[str]:
+        """v5.11 creative layer: one Arabic lesson sentence for a CLOSED trade.
+
+        Best-effort and non-blocking by design (called from a throwaway
+        thread in cycle.py): returns None on ANY failure. No caching -
+        every closed trade is unique.
+        """
+        if not self.enabled or not closed_trade:
+            return None
+        raw = self._chat(
+            self._postmortem_system_prompt(),
+            self._postmortem_user_prompt(closed_trade),
+            max_tokens=160,
+        )
+        if not raw:
+            return None
+        return sanitize_comment(raw, max_len=280) or None
+
 
 # Singleton
 ai_advisor = LLMAdvisor()

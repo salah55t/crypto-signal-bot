@@ -16,6 +16,7 @@ v5 "Veteran Trader" management:
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime, timezone, timedelta
+import secrets
 from config.settings import settings
 from src.db.database import db
 from src.utils.logger import log
@@ -24,6 +25,23 @@ from src.utils.helpers import load_json, save_json, now_utc
 POSITIONS_FILE = Path("data/open_positions.json")
 DAILY_STATS_FILE = Path("data/daily_stats.json")
 PENDING_FILE = Path("data/pending_entries.json")
+
+
+def _new_trade_uid() -> str:
+    """v5.11: unique, human-readable trade identity (ledger primary key)."""
+    return f"TRD-{now_utc().strftime('%Y%m%d')}-{secrets.token_hex(2).upper()}"
+
+
+def _primary_strategy(rec: Dict) -> str:
+    """Best-scoring strategy name attached to the recommendation (for stats)."""
+    sigs = rec.get("signals") or []
+    try:
+        best = max(sigs, key=lambda s: float(s.get("score", 0) or 0))
+        if best and best.get("strategy"):
+            return str(best["strategy"])
+    except Exception:
+        pass
+    return str(rec.get("strategy") or "")
 
 
 class RiskManager:
@@ -38,6 +56,10 @@ class RiskManager:
         )
         # v4.1 loss-avoidance state
         self._reentry_block: Dict[str, datetime] = {}  # symbol -> blocked until
+        # v5.11: reconcile the JSON working set with the persistent ledger
+        # BEFORE anything else touches positions (entry prices survive even
+        # when data/open_positions.json is wiped by a redeploy).
+        self._restore_from_db()
         self._restore_loss_state()
         log.info(
             f"[cyan]RiskManager[/] initialized (v5) - "
@@ -297,13 +319,20 @@ class RiskManager:
             "mae_pct": 0.0,
             "status": "open",
             "paper": True,
+            # v5.11 persistent ledger identity + original levels
+            "trade_uid": _new_trade_uid(),
+            "initial_sl": sl,
+            "initial_tp": rec["take_profit"],
+            "realized_pnl": 0.0,
+            "partial_count": 0,
+            "strategy": _primary_strategy(rec),
         }
         self.open_positions.append(position)
         save_json(self.open_positions, POSITIONS_FILE)
         self._ensure_today_stats()
         self.daily_stats[self._today_key()]["trades_opened"] += 1
         save_json(self.daily_stats, DAILY_STATS_FILE)
-        # Log to database
+        # Log to database (ledger: entry price is now immutable in the DB)
         try:
             db.log_position_opened(position)
         except Exception as e:
@@ -428,12 +457,26 @@ class RiskManager:
                 "buy_order_id": buy_order_id,
                 "oco_order_id": oco_id,
                 "oco_order_response": oco_order,
+                # v5.11 persistent ledger identity + original levels
+                "trade_uid": _new_trade_uid(),
+                "initial_sl": float(sl),
+                "initial_tp": float(tp),
+                "realized_pnl": 0.0,
+                "partial_count": 0,
+                "strategy": _primary_strategy(rec),
             }
             self.open_positions.append(position)
             save_json(self.open_positions, POSITIONS_FILE)
             self._ensure_today_stats()
             self.daily_stats[self._today_key()]["trades_opened"] += 1
             save_json(self.daily_stats, DAILY_STATS_FILE)
+            # v5.11 bugfix: LIVE positions were never written to the DB -
+            # a restart erased them completely. The ledger now records
+            # real fills (avg entry price) exactly like paper trades.
+            try:
+                db.log_position_opened(position)
+            except Exception as e:
+                log.debug(f"DB log_position_opened (live) failed: {e}")
 
             return {"status": "opened", "position": position, "buy_order": buy_order, "oco_order": oco_order}
 
@@ -502,6 +545,11 @@ class RiskManager:
                 "pnl_pct": pnl_pct,
                 "reason": reason,
             })
+            # v5.11: accumulate the realized profit ON the trade itself -
+            # the final close must report the WHOLE-trade result
+            # (partials + final chunk), not just the last chunk.
+            pos["realized_pnl"] = float(pos.get("realized_pnl", 0) or 0) + net_pnl
+            pos["partial_count"] = len(pos.get("partial_closes", []))
             save_json(self.open_positions, POSITIONS_FILE)
             self._ensure_today_stats()
             self.daily_stats[self._today_key()]["pnl"] += net_pnl
@@ -509,18 +557,32 @@ class RiskManager:
                 self.daily_stats[self._today_key()].get("partials", 0) + 1
             )
             save_json(self.daily_stats, DAILY_STATS_FILE)
+            # v5.11 ledger: partial closes ACCUMULATE realized_pnl and keep
+            # status='open'. The old code wrote exit_time here, so the DB
+            # counted the trade as closed and the final close ERASED the
+            # TP1 profit by overwriting the same row.
             try:
-                db.log_position_closed(
+                db.record_partial_close(
+                    trade_uid=pos.get("trade_uid"),
                     symbol=pos["symbol"],
                     entry_time=pos["entry_time"],
+                    remaining_notional=pos["notional_usd"],
+                    remaining_size=pos.get("size", 0),
+                    realized_total=pos["realized_pnl"],
+                    partial_count=pos["partial_count"],
+                    tp1_taken=bool(pos.get("tp1_taken")),
+                    stop_loss=pos["stop_loss"],
+                    take_profit=pos["take_profit"],
                     exit_price=exit_price,
                     exit_time=now_utc().isoformat(),
-                    pnl=net_pnl,
-                    pnl_pct=pnl_pct,
-                    close_reason=reason,
+                    chunk_pnl=net_pnl,
+                    chunk_pnl_pct=pnl_pct,
+                    fraction=fraction,
+                    reason=reason,
                 )
+                db.update_daily_stats(date=self._today_key(), pnl_delta=net_pnl)
             except Exception as e:
-                log.debug(f"DB log partial close failed: {e}")
+                log.debug(f"DB record_partial_close failed: {e}")
             log.info(
                 f"[green]PARTIAL close ({fraction*100:.0f}%)[/] {pos['symbol']} - "
                 f"Net: ${net_pnl:+.4f} ({pnl_pct:+.2f}%) - {reason} | "
@@ -530,10 +592,32 @@ class RiskManager:
                     "pnl_pct": pnl_pct, "reason": reason, "fraction": fraction}
 
         # ---- full close (original path, fraction == 1.0) ----
+        # v5.11: WHOLE-trade accounting - the final chunk PLUS everything
+        # already banked by partial closes (TP1). This is the number that
+        # goes to the DB, Telegram and the stats engine.
+        realized_prev = float(pos.get("realized_pnl", 0) or 0)
+        trade_total_pnl = realized_prev + net_pnl
+        initial_notional = float(pos.get("initial_notional_usd")
+                                 or notional_full or 0)
+        trade_total_pct = (trade_total_pnl / initial_notional * 100) \
+            if initial_notional > 0 else pnl_pct
+        mfe_val = float(pos.get("mfe_pct", 0) or 0)
+        capture_eff = None
+        if mfe_val > 0 and initial_notional > 0:
+            capture_eff = max(-200.0, min(200.0,
+                (trade_total_pnl / initial_notional * 100) / mfe_val * 100))
         closed = {**pos, "exit_price": exit_price, "exit_time": now_utc().isoformat(),
                   "pnl": net_pnl, "pnl_pct": pnl_pct, "reason": reason,
                   "status": "closed", "entry_fee": entry_fee, "exit_fee": exit_fee,
-                  "gross_pnl": gross_pnl}
+                  "gross_pnl": gross_pnl,
+                  # v5.11 whole-trade result + autopsy metrics
+                  "trade_uid": pos.get("trade_uid"),
+                  "total_pnl": trade_total_pnl,
+                  "total_pnl_pct": trade_total_pct,
+                  "capture_efficiency": capture_eff,
+                  "duration_hours": round(self._position_age_hours(pos), 2),
+                  "partials_count": len(pos.get("partial_closes", [])),
+                  "risk_updates_count": len(pos.get("risk_updates", []))}
         self.open_positions.pop(idx)
         save_json(self.open_positions, POSITIONS_FILE)
         # Update daily stats
@@ -559,31 +643,41 @@ class RiskManager:
             else:
                 self._persist_loss_state()
         save_json(self.daily_stats, DAILY_STATS_FILE)
-        # Log to database
+        # Log to database (v5.11 ledger: close by trade_uid, whole-trade PnL)
         try:
-            db.log_position_closed(
+            db.close_trade(
+                trade_uid=pos.get("trade_uid"),
                 symbol=pos["symbol"],
                 entry_time=pos["entry_time"],
                 exit_price=exit_price,
                 exit_time=closed["exit_time"],
-                pnl=net_pnl,
-                pnl_pct=pnl_pct,
+                final_pnl=net_pnl,
+                final_pnl_pct=pnl_pct,
+                total_pnl=trade_total_pnl,
+                total_pnl_pct=trade_total_pct,
                 close_reason=reason,
+                exit_fee=exit_fee,
+                peak_price=pos.get("peak_price"),
+                trough_price=pos.get("trough_price"),
+                mfe_pct=pos.get("mfe_pct"),
+                mae_pct=pos.get("mae_pct"),
             )
-            # Update daily stats in DB
+            # Update daily stats in DB (v5.11 fix: pnl_delta was always 0,
+            # so the DB daily P&L never moved)
             db.update_daily_stats(
                 date=self._today_key(),
                 trades_opened=self.daily_stats[self._today_key()]["trades_opened"],
                 wins=self.daily_stats[self._today_key()]["wins"],
                 losses=self.daily_stats[self._today_key()]["losses"],
-                pnl_delta=0,  # already updated above
+                pnl_delta=net_pnl,
             )
         except Exception as e:
-            log.debug(f"DB log_position_closed failed: {e}")
+            log.debug(f"DB close_trade failed: {e}")
         log.info(
             f"[yellow]Position closed[/] {pos['symbol']} - "
-            f"Gross P&L: ${gross_pnl:+.4f} - Fees: ${entry_fee+exit_fee:.4f} "
-            f"= Net: ${net_pnl:+.4f} ({pnl_pct:+.2f}%) - {reason}"
+            f"chunk ${net_pnl:+.4f} + partials ${realized_prev:+.4f} = "
+            f"TOTAL ${trade_total_pnl:+.4f} ({trade_total_pct:+.2f}%) - "
+            f"fees ${entry_fee+exit_fee:.4f} - {reason}"
         )
         return closed
 
@@ -756,6 +850,8 @@ class RiskManager:
                 if partial_res.get("status") == "partial":
                     pos = self.open_positions[i]  # refreshed after partial
                     pos["tp1_taken"] = True
+                    pre_sl = pos["stop_loss"]
+                    pre_tp = pos["take_profit"]
                     # SL to break-even + fee buffer (never turns a winner red)
                     entry = pos["entry_price"]
                     buf = settings.TP1_FEE_BUFFER_PCT / 100.0
@@ -773,6 +869,12 @@ class RiskManager:
                         elif direction == "bearish" and tp2 < pos["take_profit"]:
                             pos["take_profit"] = tp2
                     save_json(self.open_positions, POSITIONS_FILE)
+                    # v5.11: the TP1 level promotion is persisted to the
+                    # ledger too (stop_loss/take_profit columns + event)
+                    self._sync_levels(
+                        pos, pos["take_profit"], old_sl=pre_sl, old_tp=pre_tp,
+                        reason="TP1: SL->breakeven+fees, TP->TP2",
+                        event_type="TP1_LEVELS")
                     log.info(
                         f"[blue]Break-even lock[/] {pos['symbol']} "
                         f"SL -> {pos['stop_loss']:.4f} | "
@@ -853,6 +955,12 @@ class RiskManager:
             if new_tp is not None:
                 pos["take_profit"] = new_tp
             save_json(self.open_positions, POSITIONS_FILE)
+            # v5.11: EVERY SL/TP update is mirrored into the database
+            # (positions row + trade_events audit row). This is the piece
+            # that was completely missing before - on Render the JSON file
+            # is wiped on every redeploy and the updated levels were lost.
+            self._sync_levels(pos, current_price, old_sl=old_sl, old_tp=old_tp,
+                              reason=reason, event_type="RISK_UPDATE")
             log.info(
                 f"[blue]Risk update[/] {pos['symbol']} - "
                 f"SL: {old_sl:.4f} -> {pos['stop_loss']:.4f} | "
@@ -864,6 +972,153 @@ class RiskManager:
     def has_open_position(self, symbol: str) -> bool:
         """Check if a position is already open for the given symbol."""
         return any(p.get("symbol") == symbol for p in self.open_positions)
+
+    # ============================================
+    # v5.11: PERSISTENT TRADE LEDGER (source of truth = DB)
+    # ============================================
+
+    def _sync_levels(self, pos: Dict, price: float, old_sl: float = None,
+                     old_tp: float = None, reason: str = "",
+                     event_type: str = "RISK_UPDATE"):
+        """Mirror the current SL/TP (+ excursion snapshot) into the ledger.
+        Best-effort: a DB hiccup must never break trade management."""
+        try:
+            db.update_position_levels(
+                trade_uid=pos.get("trade_uid"),
+                symbol=pos.get("symbol"),
+                entry_time=pos.get("entry_time"),
+                stop_loss=pos.get("stop_loss"),
+                take_profit=pos.get("take_profit"),
+                old_sl=old_sl, old_tp=old_tp,
+                price=price, reason=reason, event_type=event_type,
+                peak_price=pos.get("peak_price"),
+                trough_price=pos.get("trough_price"),
+                mfe_pct=pos.get("mfe_pct"),
+                mae_pct=pos.get("mae_pct"),
+                notional_usd=pos.get("notional_usd"),
+                size=pos.get("size"),
+                tp1_taken=pos.get("tp1_taken") if pos.get("tp1_taken") else None,
+            )
+        except Exception as e:
+            log.debug(f"Ledger level sync failed: {e}")
+
+    @staticmethod
+    def _position_from_row(row: Dict) -> Dict:
+        """Rebuild a manageable position dict from a ledger row."""
+        entry = float(row.get("entry_price") or 0)
+        sl = float(row.get("stop_loss") or 0)
+        tp = float(row.get("take_profit") or 0)
+        tp2 = row.get("tp2") or tp
+        return {
+            "symbol": row.get("symbol"),
+            "direction": row.get("direction") or "bullish",
+            "entry_price": entry,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "take_profit_2": float(tp2) if tp2 else tp,
+            "size": float(row.get("size") or 0),
+            "notional_usd": float(row.get("notional_usd") or 0),
+            "initial_notional_usd": float(
+                row.get("initial_notional") or row.get("notional_usd") or 0),
+            "entry_fee": float(row.get("entry_fee") or 0),
+            "entry_time": row.get("entry_time"),
+            "confidence": float(row.get("confidence") or 0),
+            "status": "open",
+            "paper": bool(row.get("paper", 1)),
+            "trade_uid": row.get("trade_uid"),
+            "initial_sl": row.get("initial_sl") if row.get("initial_sl") is not None else sl,
+            "initial_tp": row.get("initial_tp") if row.get("initial_tp") is not None else tp,
+            "tp1_taken": bool(row.get("tp1_taken")),
+            "realized_pnl": float(row.get("realized_pnl") or 0),
+            "partial_count": int(row.get("partial_count") or 0),
+            "partial_closes": [],
+            "peak_price": float(row.get("peak_price") or entry),
+            "trough_price": float(row.get("trough_price") or entry),
+            "mfe_pct": float(row.get("mfe_pct") or 0),
+            "mae_pct": float(row.get("mae_pct") or 0),
+            "strategy": row.get("strategy") or "",
+            "risk_updates": [],
+            "restored_from_db": True,
+        }
+
+    def _restore_from_db(self):
+        """v5.11: reconcile open positions with the persistent ledger.
+
+        Direction 1 - JSON lost (Render redeploy wiped the disk):
+            DB rows with status='open' are restored, entry prices intact.
+        Direction 2 - DB lost/empty (fresh DB or rotated credentials):
+            JSON positions are written INTO the ledger so they survive.
+        Direction 3 - legacy JSON positions without trade_uid:
+            they get a uid and their existing DB row is tagged (or a row is
+            created).
+        """
+        if not settings.TRADE_LEDGER_RESTORE:
+            return
+        try:
+            db_rows = db.get_open_positions() or []
+        except Exception as e:
+            log.debug(f"Ledger restore unavailable: {e}")
+            return
+        changed = False
+        json_uids = {p.get("trade_uid") for p in self.open_positions
+                     if p.get("trade_uid")}
+        json_symbols = {p.get("symbol") for p in self.open_positions}
+        db_uids = {r.get("trade_uid") for r in db_rows if r.get("trade_uid")}
+
+        # --- 1) legacy JSON positions: tag or insert into the ledger ---
+        for p in self.open_positions:
+            if p.get("trade_uid"):
+                continue
+            uid = _new_trade_uid()
+            p["trade_uid"] = uid
+            p.setdefault("realized_pnl", 0.0)
+            p.setdefault("partial_count", 0)
+            changed = True
+            try:
+                if (db.attach_trade_uid(p.get("symbol", ""),
+                                        p.get("entry_time", ""), uid) or 0) < 1:
+                    db.log_position_opened(p)
+                db_uids.add(uid)
+            except Exception as e:
+                log.debug(f"Ledger tag/insert failed: {e}")
+
+        # --- 2) uid-bearing JSON positions missing from the DB ---
+        for p in self.open_positions:
+            uid = p.get("trade_uid")
+            if uid and uid not in db_uids:
+                try:
+                    db.log_position_opened(p)
+                    db_uids.add(uid)
+                    changed = True
+                    log.info(
+                        f"[blue]Ledger backfill[/] {p.get('symbol')} "
+                        f"written to DB (was missing)")
+                except Exception as e:
+                    log.debug(f"Ledger backfill failed: {e}")
+
+        # --- 3) DB open positions missing from JSON: RESTORE them ---
+        restored = 0
+        for r in db_rows:
+            uid = r.get("trade_uid")
+            if not uid or uid in json_uids or r.get("symbol") in json_symbols:
+                continue
+            try:
+                pos = self._position_from_row(r)
+            except Exception as e:
+                log.debug(f"Restore parse failed for {r.get('symbol')}: {e}")
+                continue
+            self.open_positions.append(pos)
+            json_symbols.add(pos["symbol"])
+            json_uids.add(uid)
+            restored += 1
+        if restored:
+            changed = True
+            log.warning(
+                f"[yellow]Trade-ledger restore[/]: {restored} open "
+                f"position(s) recovered from the database "
+                f"(entry prices preserved)")
+        if changed:
+            save_json(self.open_positions, POSITIONS_FILE)
 
     def apply_trailing_logic(self, current_prices: Dict[str, float],
                               market_signals: Dict[str, Dict] = None) -> List[Dict]:
@@ -1286,6 +1541,13 @@ class RiskManager:
                 "mfe_pct": float(pos.get("mfe_pct", 0.0)),
                 "mae_pct": float(pos.get("mae_pct", 0.0)),
                 "partials_taken": len(pos.get("partial_closes", [])),
+                # v5.11: WHOLE-trade P&L = banked partials + unrealized rest
+                "realized_pnl": float(pos.get("realized_pnl", 0) or 0),
+                "total_pnl": float(pos.get("realized_pnl", 0) or 0) + float(pnl),
+                "total_pnl_pct": float(
+                    ((float(pos.get("realized_pnl", 0) or 0) + float(pnl))
+                     / (float(pos.get("initial_notional_usd") or notional_usd) or 1)
+                     * 100)),
                 # v5.5: full SL/TP update history (newest first, capped) so
                 # the dashboard can show WHY each update happened
                 "risk_updates": list(reversed(pos.get("risk_updates", [])))[:10],
