@@ -335,6 +335,23 @@ def open_new_positions(recommendations: List[Dict]) -> int:
     if not recommendations:
         return 0
 
+    # v5.13: regime freeze gate - in a full crisis (high BTC volatility +
+    # bearish leaders + extreme fear) the router freezes NEW entries
+    # entirely; open positions are still managed normally.
+    try:
+        if settings.REGIME_ENABLED:
+            from src.analysis.regime_router import regime_router
+            pol = regime_router.active_policy()
+            if not pol.get("allow_new_entries", True):
+                log.warning(
+                    f"[yellow]Regime freeze gate:[/] "
+                    f"{pol.get('freeze_reason', 'crisis')} - "
+                    f"no new entries this cycle"
+                )
+                return 0
+    except Exception:
+        pass
+
     # v4.1: sync today's opened count from DB (survives restarts on Render)
     try:
         today_rows = db.get_daily_stats(1)
@@ -505,6 +522,17 @@ def run_analysis_cycle():
 
     # ---- STEP 1: manage open positions (SL/TP + partial + trailing) ----
     manage_open_positions()
+
+    # ---- STEP 1.5: regime router (v5.13) - classify the market state and
+    # log the resulting policy once per cycle (cached 15 min, no extra REST
+    # weight: leaders come from the market cycle cache, F&G is a free API
+    # cached 4h, volatility reads the WS candle cache).
+    if settings.REGIME_ENABLED:
+        try:
+            from src.analysis.regime_router import regime_router
+            regime_router.get_regime()
+        except Exception as e:
+            log.debug(f"Regime router skipped: {e}")
 
     # ---- STEP 2: market analysis ----
     recommendations = analyzer_analyze()

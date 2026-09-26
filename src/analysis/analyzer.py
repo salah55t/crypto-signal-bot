@@ -370,6 +370,20 @@ class MarketAnalyzer:
             log.error(f"Bottom scanner boost failed: {e}")
 
         # Limit
+        # v5.13: Regime Router - re-rank the merged candidate list by how
+        # well each rec's strategies fit the CURRENT market state (leaders
+        # + Fear & Greed + weekend + BTC volatility), then slice the top N.
+        # In a ranging regime a mean-reversion candidate now outranks an
+        # equal-scoring breakout candidate; in a crisis everything shrinks.
+        try:
+            if settings.REGIME_ENABLED:
+                from src.analysis.regime_router import regime_router
+                top_pre = filtered[:settings.MAX_RECOMMENDATIONS * 2]
+                regime_router.apply_regime_routing(top_pre)
+                filtered = top_pre
+        except Exception as e:
+            log.warning(f"[yellow]Regime routing skipped: {e}[/]")
+
         top = filtered[:settings.MAX_RECOMMENDATIONS]
 
         # === Log to database ===
@@ -400,6 +414,20 @@ class MarketAnalyzer:
             "top_recommendations": top,
             "all_results": results,
         }
+        # v5.13: embed the regime snapshot so dashboard/WS read it free
+        try:
+            if settings.REGIME_ENABLED:
+                from src.analysis.regime_router import regime_router
+                rg = regime_router.get_regime()
+                save_data["regime"] = {
+                    k: rg.get(k) for k in
+                    ("state", "state_ar", "weekend", "fear_greed",
+                     "volatility", "leaders", "size_multiplier",
+                     "min_confidence_adjust", "min_rr_adjust",
+                     "allow_new_entries", "reasons_ar")
+                }
+        except Exception:
+            pass
         save_json(to_json_safe(save_data), RECOMMENDATIONS_FILE)
         log.info(f"Recommendations saved to {RECOMMENDATIONS_FILE}")
 

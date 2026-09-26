@@ -105,12 +105,31 @@ class TelegramNotifier:
 
         sent = 0
         # Header — emphasize these are TRACKED positions (v5.8: Arabic)
+        # v5.13: market regime line (leaders + Fear & Greed + weekend + vol)
+        regime_line = ""
+        effective_amount = settings.TRADE_AMOUNT_USD
+        try:
+            if settings.REGIME_ENABLED:
+                from src.analysis.regime_router import regime_router
+                rg = regime_router.status()
+                regime_line = str(rg.get("state_ar", ""))
+                mult = float(rg.get("size_multiplier", 1.0) or 1.0)
+                if abs(mult - 1.0) > 1e-9:
+                    effective_amount = round(settings.TRADE_AMOUNT_USD * mult, 2)
+        except Exception:
+            regime_line = ""
+        regime_block = f"🌐 حالة السوق: _{regime_line}_\n" if regime_line else ""
+        amount_note = (
+            f"${effective_amount}" if effective_amount != settings.TRADE_AMOUNT_USD
+            else f"${settings.TRADE_AMOUNT_USD}"
+        )
         header = (
             f"*🎯 أفضل {len(fresh)} توصية — صفقات تُفتح وتُتابع تلقائياً*\n"
             f"━━━━━━━━━━━━━━━\n"
             f"⏰ _{fresh[0].get('analyzed_at', 'N/A')[:19]}_\n"
             f"💼 الوضع: `{ar_mode(settings.RUN_MODE)}`\n"
-            f"💵 حجم الصفقة: `${settings.TRADE_AMOUNT_USD}` لكل صفقة\n"
+            f"🌐 حالة السوق: _{regime_line or '—'}_\n"
+            f"💵 حجم الصفقة: `{amount_note}` لكل صفقة\n"
             f"📊 البوت سيفتح ويتابع جميع الصفقات الـ{len(fresh)}\n"
             f"🔄 تحديثات ديناميكية للوقف/الهدف عبر التحليل المستمر\n"
             f"🛑 إغلاق تلقائي عند لمس الوقف/الهدف (فحص كل دورة)\n"

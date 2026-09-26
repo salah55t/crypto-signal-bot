@@ -678,6 +678,41 @@ async function fetchMarketMap() {
   } catch (e) {
     console.error('Market map fetch error:', e);
   }
+  // v5.13: regime chip (state + gates) inside the market cycle panel
+  try {
+    const rr = await fetch(`${API}/regime`);
+    const rj = await rr.json();
+    renderRegimeChip(rj && rj.ok ? rj : null);
+  } catch (e) {
+    console.error('Regime fetch error:', e);
+  }
+}
+
+function renderRegimeChip(data) {
+  const $el = document.getElementById('mcRegime');
+  if (!$el) return;
+  if (!data || !data.regime || !data.regime.state_ar) {
+    $el.style.display = 'none';
+    return;
+  }
+  const rg = data.regime;
+  const g = data.gates || {};
+  const freeze = g.allow_new_entries === false;
+  const reasons = (rg.reasons_ar || [])
+    .map(t => `<li style="margin-bottom:2px;">${escapeHtml(t)}</li>`).join('');
+  $el.innerHTML =
+    `<div class="glass" style="padding:8px 10px; border-inline-start:3px solid var(--accent);">` +
+    `<div style="font-weight:700; margin-bottom:4px;">🧭 حالة السوق (v5.13)</div>` +
+    `<div style="margin-bottom:6px;">${escapeHtml(rg.state_ar || '')}` +
+    (freeze ? ` <span style="color:var(--red); font-weight:700;">· فتح الصفقات مجمّد</span>` : '') +
+    `</div>` +
+    `<div style="color:var(--text-muted); font-size:0.85em; margin-bottom:4px;">` +
+    `بوابات القبول الفعلية: ثقة ≥ ${g.min_confidence != null ? Math.round(g.min_confidence) : '—'}% · ` +
+    `RR ≥ ${g.min_rr != null ? Number(g.min_rr).toFixed(2) : '—'} · ` +
+    `حجم المركز ×${g.size_multiplier != null ? g.size_multiplier : '—'}</div>` +
+    (reasons ? `<ul style="margin:0; padding-inline-start:18px; font-size:0.85em; color:var(--text);">${reasons}</ul>` : '') +
+    `</div>`;
+  $el.style.display = 'block';
 }
 
 // v5.4: human-readable classification file viewer (decision-making aid)

@@ -343,6 +343,17 @@ class Settings:
     # bulk analysis burst can never starve open-position monitoring.
     RATE_PRIORITY_RESERVE: float = float(os.getenv("RATE_PRIORITY_RESERVE", "200"))
 
+    # --- v5.13 Regime Router (right strategy for the market state) ---
+    # Market state = leaders (BTC/ETH/SOL/XRP) + Fear & Greed + weekend +
+    # BTC volatility. Routes strategy ranking, admission gates and sizing.
+    REGIME_ENABLED: bool = os.getenv("REGIME_ENABLED", "true").lower() == "true"
+    REGIME_REFRESH_MIN: int = int(os.getenv("REGIME_REFRESH_MIN", "15"))
+    # Fear & Greed index (alternative.me, free, no key; updates daily)
+    FNG_ENABLED: bool = os.getenv("FNG_ENABLED", "true").lower() == "true"
+    FNG_CACHE_HOURS: float = float(os.getenv("FNG_CACHE_HOURS", "4"))
+    # Weekend window: Fri 22:00 UTC -> Mon 00:00 UTC (thin liquidity)
+    WEEKEND_FILTER: bool = os.getenv("WEEKEND_FILTER", "true").lower() == "true"
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "data/logs/bot.log")

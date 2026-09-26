@@ -127,6 +127,33 @@ async def root():
     return JSONResponse({"message": "Dashboard not found. Visit /docs for API."}, status_code=404)
 
 
+@app.get("/api/regime")
+async def regime():
+    """v5.13: current market regime + acceptance policy snapshot.
+
+    State = major coins (weighted leaders score) + Fear & Greed index +
+    weekend window + BTC volatility ratio. The policy shows the ACTIVE
+    acceptance gates (confidence/RR shifts) and the size multiplier."""
+    try:
+        from src.analysis.regime_router import regime_router
+        rg = regime_router.status()
+        return {
+            "ok": True,
+            "regime": rg,
+            "gates": {
+                "min_confidence": settings.MIN_CONFIDENCE
+                + float(rg.get("min_confidence_adjust", 0) or 0),
+                "min_rr": settings.MIN_RR_RATIO
+                + float(rg.get("min_rr_adjust", 0) or 0),
+                "size_multiplier": float(rg.get("size_multiplier", 1.0) or 1.0),
+                "allow_new_entries": bool(rg.get("allow_new_entries", True)),
+            },
+            "strategy_weights": rg.get("strategy_weights", {}),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/health")
 async def health():
     # v5.2: surface rate-limit state so "bot silent" is explainable

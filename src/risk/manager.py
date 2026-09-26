@@ -209,13 +209,46 @@ class RiskManager:
         risk_amount = self.capital * (settings.RISK_PER_TRADE / 100)
         return risk_amount / risk_per_unit
 
+    @staticmethod
+    def _regime_gates() -> tuple:
+        """v5.13: (effective_min_confidence, effective_min_rr) from the regime
+        router. Fails open to static settings on any error."""
+        try:
+            if not settings.REGIME_ENABLED:
+                return (settings.MIN_CONFIDENCE, settings.MIN_RR_RATIO)
+            from src.analysis.regime_router import regime_router
+            pol = regime_router.active_policy()
+            return (
+                settings.MIN_CONFIDENCE + float(pol.get("min_confidence_adjust", 0)),
+                settings.MIN_RR_RATIO + float(pol.get("min_rr_adjust", 0)),
+            )
+        except Exception:
+            return (settings.MIN_CONFIDENCE, settings.MIN_RR_RATIO)
+
+    @staticmethod
+    def _regime_size_multiplier() -> float:
+        """v5.13: regime size multiplier (0.25..1.25); 1.0 on any failure."""
+        try:
+            if not settings.REGIME_ENABLED:
+                return 1.0
+            from src.analysis.regime_router import regime_router
+            return float(regime_router.active_policy().get("size_multiplier", 1.0))
+        except Exception:
+            return 1.0
+
     def validate_recommendation(self, rec: Dict) -> tuple:
         """
         Returns (is_valid, reasons).
         Validates R/R ratio, ATR sanity, etc.
         v5: harmony gate (layered agreement) + volatility sanity.
+        v5.13: REGIME-ADJUSTED thresholds - the regime router (leaders +
+        Fear & Greed + weekend + BTC volatility) shifts MIN_CONFIDENCE and
+        MIN_RR up in hostile states (weekend, high vol, extreme fear/greed,
+        bearish leaders) instead of using static settings only.
         """
         reasons = []
+        # v5.13: regime-adjusted effective gates (cheap: cached policy)
+        conf_gate, rr_gate = self._regime_gates()
         # v4: vetoed signals (Ichimoku regime opposition) can never open positions
         if rec.get("decision", {}).get("vetoed", False):
             reasons.append(
@@ -223,11 +256,15 @@ class RiskManager:
                 f"{rec.get('decision', {}).get('veto_reason', 'regime opposition')}"
             )
         rr = rec.get("risk_reward_ratio", 0)
-        if rr < settings.MIN_RR_RATIO:
-            reasons.append(f"R/R too low ({rr:.2f} < {settings.MIN_RR_RATIO})")
+        if rr < rr_gate:
+            reasons.append(
+                f"R/R too low ({rr:.2f} < {rr_gate:.2f} "
+                f"[regime-adjusted])")
         if rec.get("admission_confidence",
-                   rec.get("confidence", 0)) < settings.MIN_CONFIDENCE:
-            reasons.append(f"Confidence too low ({rec['confidence']:.1f}%)")
+                   rec.get("confidence", 0)) < conf_gate:
+            reasons.append(
+                f"Confidence too low ({rec['confidence']:.1f}% < "
+                f"{conf_gate:.0f}% [regime-adjusted])")
         if rec.get("expected_rise_pct", 0) < settings.MIN_EXPECTED_RISE:
             reasons.append(f"Expected rise too low ({rec['expected_rise_pct']:.2f}%)")
         if rec.get("stop_loss", 0) <= 0:
@@ -274,7 +311,10 @@ class RiskManager:
         entry = rec["current_price"]
         sl = rec["stop_loss"]
         # Use fixed $10 trade amount (configurable via TRADE_AMOUNT_USD)
-        notional_usd = settings.TRADE_AMOUNT_USD
+        # v5.13: scaled by the regime size multiplier (weekend / high-vol /
+        # extreme fear-greed shrink the position, strong trend may grow it)
+        regime_mult = self._regime_size_multiplier()
+        notional_usd = round(settings.TRADE_AMOUNT_USD * regime_mult, 2)
         # Compute quantity (USD / price), apply LOT_SIZE rules
         raw_qty = notional_usd / entry if entry > 0 else 0
         # Round to LOT_SIZE step if possible (skip for paper without API)
@@ -384,7 +424,9 @@ class RiskManager:
         risk_amount = self.capital * (settings.RISK_PER_TRADE / 100)
         # USD notional to spend: 2x risk amount (gives reasonable position size)
         # Adjust so position size matches risk_per_trade model
-        notional_usd = min(risk_amount * 10, self.capital * 0.20)  # cap at 20% of capital
+        # v5.13: regime size multiplier applies to LIVE notional too
+        notional_usd = min(risk_amount * 10 * self._regime_size_multiplier(),
+                           self.capital * 0.20)  # cap at 20% of capital
         if notional_usd < 10:
             return {"status": "rejected", "reasons": [f"Notional ${notional_usd:.2f} below Binance minimum"]}
 
