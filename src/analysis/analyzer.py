@@ -159,8 +159,13 @@ class MarketAnalyzer:
         except Exception:
             pass
 
-    def analyze_one(self, symbol: str) -> Dict:
-        """Fetch data and run analysis for one symbol."""
+    def analyze_one(self, symbol: str, ws_only: bool = False) -> Dict:
+        """Fetch data and run analysis for one symbol.
+
+        v5.14: `ws_only=True` (degraded cycle during a REST ban) skips the
+        order book fetch (weight 5) - candles come from the WS cache, so
+        the symbol costs ZERO REST weight.
+        """
         # v5.12: mid-burst ban - fail this symbol WITHOUT a doomed network
         # attempt and flag the reason so analyze_all can abort the burst.
         if _ban_active():
@@ -180,9 +185,10 @@ class MarketAnalyzer:
             if df is None or len(df) < 60:
                 return {"symbol": symbol, "skip": True, "reason": "Insufficient primary data"}
 
-            # Fetch order book (only if not skipped for performance)
+            # Fetch order book (only if not skipped for performance).
+            # v5.14: ws_only mode skips it too - zero REST during a ban.
             order_book = None
-            if not settings.SKIP_ORDER_BOOK:
+            if not settings.SKIP_ORDER_BOOK and not ws_only:
                 try:
                     order_book = data_fetcher.get_order_book(
                         symbol, limit=settings.ORDER_BOOK_DEPTH
@@ -204,25 +210,35 @@ class MarketAnalyzer:
             log.error(f"Analysis failed for {symbol}: {e}")
             return {"symbol": symbol, "skip": True, "reason": f"Error: {e}"}
 
-    def analyze_all(self, parallel: bool = True, max_workers: int = None) -> List[Dict]:
-        """Analyze all configured symbols."""
+    def analyze_all(self, parallel: bool = True, max_workers: int = None,
+                    ws_only: bool = False) -> List[Dict]:
+        """Analyze all configured symbols.
+
+        v5.14: `ws_only=True` runs the burst purely off the WS candle cache
+        (order books skipped) - used by the degraded cycle while a REST
+        rate ban is active; WS streams bypass the REST budget entirely.
+        """
         if max_workers is None:
             max_workers = settings.MAX_WORKERS
         log.info(
             f"[cyan]Starting market analysis[/] for {len(self.symbols)} symbols "
-            f"(parallel={parallel}, workers={max_workers}, timeframes={settings.TIMEFRAMES})"
+            f"(parallel={parallel}, workers={max_workers}, "
+            f"timeframes={settings.TIMEFRAMES}, ws_only={ws_only})"
         )
         start = time.time()
 
-        # Refresh symbols list before each cycle (when in dynamic mode)
-        if settings.USE_ALL_USDT_PAIRS:
+        # Refresh symbols list before each cycle (when in dynamic mode).
+        # v5.14: skipped in ws_only mode - /ticker/24hr (weight 80) is REST
+        # and the cached list is good enough while a ban is active.
+        if settings.USE_ALL_USDT_PAIRS and not ws_only:
             self.refresh_symbols()
 
         results = []
         ban_skips = 0  # v5.12: symbols skipped because a ban went active
         if parallel and len(self.symbols) > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {ex.submit(self.analyze_one, s): s for s in self.symbols}
+                futures = {ex.submit(self.analyze_one, s, ws_only): s
+                           for s in self.symbols}
                 for fut in as_completed(futures):
                     try:
                         r = fut.result()
@@ -241,7 +257,7 @@ class MarketAnalyzer:
                         break
         else:
             for s in self.symbols:
-                r = self.analyze_one(s)
+                r = self.analyze_one(s, ws_only=ws_only)
                 if r.get("reason") == "rate ban":
                     ban_skips += 1
                     if ban_skips >= 3 and _ban_active():

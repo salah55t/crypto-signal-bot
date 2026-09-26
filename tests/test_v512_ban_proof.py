@@ -280,7 +280,7 @@ def test_analyze_all_aborts_and_keeps_snapshot(monkeypatch, isolated_rec_file):
 
     an = _analyzer_with_symbols(monkeypatch, [f"S{i}USDT" for i in range(20)])
 
-    def fake_analyze_one(self, symbol):
+    def fake_analyze_one(self, symbol, ws_only=False):
         if _ban_active():
             return {"symbol": symbol, "skip": True, "reason": "rate ban"}
         return {"symbol": symbol, "skip": False, "confidence": 90}
@@ -303,7 +303,7 @@ def test_analyze_all_normal_run_clears_flag(monkeypatch, isolated_rec_file):
     an = _analyzer_with_symbols(monkeypatch, ["AAAUSDT", "BBBUSDT"])
     an.last_run_aborted = True  # stale flag from a previous aborted run
 
-    def fake_analyze_one(self, symbol):
+    def fake_analyze_one(self, symbol, ws_only=False):
         return {"symbol": symbol, "skip": False, "confidence": 90,
                 "expected_rise_pct": 3.0}
 

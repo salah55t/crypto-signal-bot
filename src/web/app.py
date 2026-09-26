@@ -168,6 +168,13 @@ async def health():
             "budget_per_min": int(rate_limiter.budget),
             "pressure_streak": rate_limiter.pressure_streak(),
         }
+        # v5.14: process-lifetime REST request count - the WS-first pipeline
+        # should keep this growing far slower than before.
+        try:
+            from src.core.binance_client import binance_client
+            rate_state["binance_requests_total"] = int(binance_client.request_count)
+        except Exception:
+            pass
     except Exception:
         rate_state = {"error": "unavailable"}
     try:

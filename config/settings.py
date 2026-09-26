@@ -219,6 +219,20 @@ class Settings:
     # this many minutes instead of refetching every cycle (was every cycle)
     SYMBOL_REFRESH_MIN: int = int(os.getenv("SYMBOL_REFRESH_MIN", "60"))
 
+    # --- v5.14 WS-first: live prices over WS + zero-REST degraded cycles ---
+    # The REST ban is per-IP on the REST API only - WS streams keep flowing.
+    # 1) miniTicker streams keep a live last-price for every universe symbol
+    #    (position watch, dashboard P&L, pending fills = zero REST weight).
+    WS_PRICE_TTL_S: float = float(os.getenv("WS_PRICE_TTL_S", "70"))
+    # 2) When a 429/418 cooldown is active, the analysis cycle still runs
+    #    entirely from the WS candle cache ("degraded" cycle, zero REST
+    #    weight) if at least this fraction of the universe is fresh.
+    WS_DEGRADED_COVERAGE: float = float(os.getenv("WS_DEGRADED_COVERAGE", "0.9"))
+    # 3) Cold-start/missing-series seeding paces ONE REST fetch per delay
+    #    seconds (300 weight spread over minutes instead of an 8-worker burst
+    #    that collides with shared-IP pressure).
+    WS_SEED_DELAY_S: float = float(os.getenv("WS_SEED_DELAY_S", "0.35"))
+
     # --- Position hygiene ---
     # Skip a recommendation if the same symbol already has an open position
     # (prevents duplicate entries on consecutive cycles)

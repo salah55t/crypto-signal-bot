@@ -82,6 +82,9 @@ class BinanceClient:
         self.api_key = settings.BINANCE_API_KEY
         self.api_secret = settings.BINANCE_API_SECRET
         self.session = requests.Session()
+        # v5.14: process-lifetime REST request counter (health endpoint
+        # visibility for the WS-first weight reduction).
+        self.request_count = 0
         if self.api_key:
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
         log.info(
@@ -132,6 +135,7 @@ class BinanceClient:
                 f"Rate budget exhausted ({weight}w needed); "
                 "request aborted to avoid a 429 ban"
             )
+        self.request_count += 1  # v5.14: only requests that consumed budget
 
         try:
             response = self.session.get(url, params=params, timeout=15)

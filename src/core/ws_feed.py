@@ -22,6 +22,17 @@ candle cache for the whole universe:
              missed inside a >2 min gap; the 15-min freshness TTL plus
              reseeding make that impossible).
 
+v5.14 WS-FIRST: the same connection also carries one @miniTicker stream per
+universe symbol, keeping a live LAST PRICE for every symbol (zero REST
+weight). Consumers:
+  - position watch / dashboard P&L / pending fills -> get_live_prices()
+    (keeps working during 429/418 REST bans - WS is a different service).
+  - cycle gate -> coverage() decides whether a rate-banned cycle can run
+    entirely off the WS cache ("degraded" cycle, zero REST weight).
+  - cold start -> _seed_missing() paces ONE REST fetch per WS_SEED_DELAY_S
+    for series the cache lacks (the old 8-worker analysis burst used to
+    fire ~300 REST calls at once and collide with shared-IP pressure).
+
 All public reads are thread-safe; the connection runs in a daemon thread
 with exponential reconnect backoff.
 """
@@ -65,6 +76,10 @@ class WSKlineFeed:
     def __init__(self):
         self._bars: Dict[str, deque] = {}   # keyed "SYMBOL|interval"
         self._last_event: Dict[str, float] = {}  # keyed "SYMBOL|interval"
+        # v5.14: live last prices from @miniTicker streams, keyed SYMBOL ->
+        # (monotonic_ts, last_price). Serves position watch / dashboard for
+        # zero REST weight, and keeps flowing during REST bans.
+        self._prices: Dict[str, tuple] = {}
         self._lock = threading.RLock()
         self._started = False
         self._stop = False
@@ -75,6 +90,7 @@ class WSKlineFeed:
         self._connected_since = 0.0
         self._last_disconnect_gap = 0.0
         self._needs_reseed = False      # True after a long reconnect gap
+        self._seed_busy = False         # v5.14: one hydration worker at a time
         self._reconnect_delay = 5.0
         self._last_msg_ts = 0.0
         self._msg_count = 0
@@ -97,14 +113,20 @@ class WSKlineFeed:
     # lifecycle
     # ------------------------------------------------------------------
     def update_universe(self, symbols: list) -> None:
-        """Set/refresh the subscribed symbols; (re)connects when changed."""
+        """Set/refresh the subscribed symbols; (re)connects when changed.
+
+        v5.14: a universe change NO LONGER forces a full REST reseed of the
+        existing cache (that was a hidden weight drain: the dynamic list
+        churns a little every hour -> reconnect -> ~300 REST calls). A short
+        reconnect gap cannot swallow a closed 1h/4h bar, existing series
+        stay valid, and NEW symbols are paced-seeded by _seed_missing().
+        """
         wanted = sorted({s.upper().strip() for s in symbols if s})
         with self._lock:
             changed = wanted != self._universe
             self._universe = wanted
         if changed and self._started:
             log.info(f"[cyan]WS feed[/] universe changed ({len(wanted)} symbols) - reconnecting")
-            self._needs_reseed = True
             self._restart()
 
     def start(self) -> None:
@@ -151,6 +173,11 @@ class WSKlineFeed:
                 for iv in self._intervals():
                     streams.extend(
                         f"{s.lower()}@kline_{iv}" for s in self._universe)
+                # v5.14: live last prices for the whole universe (zero REST
+                # weight) - feeds position watch, dashboard P&L and the
+                # pending-entry fill checks.
+                streams.extend(
+                    f"{s.lower()}@miniTicker" for s in self._universe)
             if not streams:
                 time.sleep(5.0)
                 continue
@@ -183,17 +210,39 @@ class WSKlineFeed:
             self._connected_since = now
             self._reconnect_delay = 5.0
             # a gap > 2 min could have swallowed an hourly bar close -> reseed
-            self._needs_reseed = gap > 120.0
+            # v5.14: never CLEAR a pending reseed flag on a fast reconnect
+            # (update_universe/_restart may have set it while we were down).
+            if gap > 120.0:
+                self._needs_reseed = True
         log.info(f"[green]WS feed connected[/] (gap {gap:.0f}s, reseed={self._needs_reseed})")
         if self._needs_reseed:
             threading.Thread(target=self._reseed_all, daemon=True).start()
+        # v5.14: pace-seed any (symbol, interval) series the cache lacks
+        if self._missing_keys():
+            threading.Thread(target=self._seed_missing, daemon=True).start()
 
     def _on_message(self, ws=None, message: str = ""):
         try:
             import json
             evt = json.loads(message)
             data = evt.get("data") or evt  # combined vs raw stream
-            if not isinstance(data, dict) or data.get("e") != "kline":
+            if not isinstance(data, dict):
+                return
+            if data.get("e") == "24hrMiniTicker":
+                # v5.14: live last price for one symbol (~1 update/s, zero
+                # REST weight). Kept even while REST is banned - different
+                # service, so position watch stays live during bans.
+                sym = data.get("s")
+                try:
+                    price = float(data.get("c"))
+                except (TypeError, ValueError):
+                    return
+                if not sym or price <= 0:
+                    return
+                with self._lock:
+                    self._prices[sym.upper().strip()] = (time.monotonic(), price)
+                return
+            if data.get("e") != "kline":
                 return
             k = data.get("k") or {}
             sym = data.get("s")
@@ -229,12 +278,68 @@ class WSKlineFeed:
         log.warning(f"[yellow]WS feed disconnected[/] (code={code}) - reconnecting")
 
     # ------------------------------------------------------------------
-    # reseeding after long gaps
+    # reseeding after long gaps + paced seeding of missing series (v5.14)
     # ------------------------------------------------------------------
     def _last_event_ts_max(self) -> Optional[float]:
         if not self._last_event:
             return None
         return max(self._last_event.values())
+
+    def _missing_keys(self) -> list:
+        """v5.14: (symbol, interval) pairs of the universe with no cache yet."""
+        with self._lock:
+            return [(s, iv)
+                    for s in self._universe
+                    for iv in self._intervals()
+                    if self._key(s, iv) not in self._bars]
+
+    def _seed_missing(self):
+        """v5.14: pace-seed every missing (symbol, interval) series via REST.
+
+        Cold start used to seed implicitly through the analysis burst: 8
+        workers x ~300 keys at once = a REST storm that collided with the
+        shared-IP pressure and triggered 429s. Now the feed hydrates ITSELF
+        in the background at ONE call per WS_SEED_DELAY_S, pausing while a
+        rate ban is active. The analysis burst then reads a warm cache.
+        """
+        with self._lock:
+            if self._seed_busy:
+                return
+            self._seed_busy = True
+        try:
+            from src.core.data_fetcher import DataFetcher  # lazy: circulars
+            from src.core.rate_limiter import rate_limiter, RateLimitError
+            failed = set()
+            total_seeded = 0
+            while not self._stop:
+                wanted = [k for k in self._missing_keys() if k not in failed]
+                if not wanted:
+                    break
+                sym, interval = wanted[0]
+                left = rate_limiter.cooldown_remaining()
+                if left > 0:
+                    # a ban dooms every REST call - wait it out (capped
+                    # checks so stop() stays responsive)
+                    time.sleep(min(30.0, max(5.0, left)))
+                    continue
+                try:
+                    df = DataFetcher._get_candles_rest(
+                        sym, interval, settings.CANDLE_LIMIT)
+                    self.ingest(sym, df, interval=interval)
+                    total_seeded += 1
+                except RateLimitError:
+                    time.sleep(10.0)
+                    continue
+                except Exception:
+                    failed.add((sym, interval))  # bad/delisted symbol
+                    continue
+                time.sleep(max(0.05, settings.WS_SEED_DELAY_S))
+            if total_seeded:
+                log.info(
+                    f"[green]WS feed seeded[/] {total_seeded} series "
+                    f"(paced ~{settings.WS_SEED_DELAY_S:.2f}s/call)")
+        finally:
+            self._seed_busy = False
 
     def _reseed_all(self):
         """REST-refetch every cached series once (after long reconnect gaps)."""
@@ -260,8 +365,12 @@ class WSKlineFeed:
                             f"active ({rate_limiter.cooldown_remaining():.0f}s left)"
                         )
                         return
-                    # bypass the cache read - reseed must hit REST directly
-                    df = DataFetcher._get_candles_rest(sym, interval, 200)
+                    # bypass the cache read - reseed must hit REST directly.
+                    # v5.14: fetch CANDLE_LIMIT (300) - the old hardcoded 200
+                    # left the cache permanently below get_cached(limit=300)'s
+                    # depth check, forcing one wasted REST call per series.
+                    df = DataFetcher._get_candles_rest(
+                        sym, interval, settings.CANDLE_LIMIT)
                     self.ingest(sym, df, interval=interval)
                 except Exception:
                     continue
@@ -321,6 +430,63 @@ class WSKlineFeed:
         ttl = settings.WS_FRESH_TTL_MIN * 60.0
         return (now - last) <= ttl
 
+    # ------------------------------------------------------------------
+    # v5.14: live prices (miniTicker) + feed health
+    # ------------------------------------------------------------------
+    def get_live_price(self, symbol: str,
+                       max_age_s: Optional[float] = None) -> Optional[float]:
+        """Last price for one symbol from the miniTicker stream, or None.
+
+        Zero REST weight - and unlike REST it keeps updating during a
+        429/418 ban, so SL/TP checks never go blind.
+        """
+        if not settings.USE_WS_FEED or not self._started:
+            return None
+        ttl = max_age_s if max_age_s is not None else settings.WS_PRICE_TTL_S
+        key = symbol.upper().strip()
+        with self._lock:
+            entry = self._prices.get(key)
+        if not entry:
+            return None
+        ts, price = entry
+        if (time.monotonic() - ts) > ttl or price <= 0:
+            return None
+        return price
+
+    def get_live_prices(self, symbols,
+                        max_age_s: Optional[float] = None) -> Dict[str, float]:
+        """v5.14: {symbol: last_price} for the requested symbols (WS only)."""
+        out = {}
+        for sym in set(symbols or []):
+            price = self.get_live_price(sym, max_age_s=max_age_s)
+            if price is not None:
+                out[sym] = price
+        return out
+
+    def is_live(self) -> bool:
+        """True when the feed is connected and messages are flowing."""
+        if not settings.USE_WS_FEED or not self._started or not self._connected:
+            return False
+        if not self._last_msg_ts:
+            return False
+        return (time.monotonic() - self._last_msg_ts) <= 120.0
+
+    def coverage(self, symbols: Optional[list] = None,
+                 intervals: Optional[list] = None) -> float:
+        """v5.14: fraction (0..1) of the universe whose cache is fresh in
+        EVERY subscribed interval - the degraded-cycle gate metric.
+        """
+        if not settings.USE_WS_FEED or not self._started:
+            return 0.0
+        syms = [s.upper().strip() for s in (symbols or self._universe) if s]
+        ivs = intervals or self._intervals()
+        if not syms or not ivs:
+            return 0.0
+        covered = sum(
+            1 for s in syms
+            if all(self.fresh(s, min_bars=60, interval=iv) for iv in ivs))
+        return covered / len(syms)
+
     def get_cached(self, symbol: str, limit: int = 200,
                    interval: str = "1h", allow_stale: bool = False,
                    max_age_s: Optional[float] = None):
@@ -370,18 +536,28 @@ class WSKlineFeed:
             for key in self._bars:
                 iv = key.rpartition("|")[2]
                 intervals[iv] = intervals.get(iv, 0) + 1
-            return {
-                "enabled": bool(settings.USE_WS_FEED),
-                "started": self._started,
-                "connected": self._connected,
-                "universe": len(self._universe),
-                "intervals": self._intervals(),
-                "cached_symbols": len(self._bars),
-                "cached_per_interval": intervals,
-                "needs_reseed": self._needs_reseed,
-                "last_msg_age_s": round(now - self._last_msg_ts, 1) if self._last_msg_ts else None,
-                "messages": self._msg_count,
-            }
+            prices = dict(self._prices)
+        fresh_prices = sum(
+            1 for ts, _ in prices.values()
+            if (now - ts) <= max(60.0, settings.WS_PRICE_TTL_S))
+        return {
+            "enabled": bool(settings.USE_WS_FEED),
+            "started": self._started,
+            "connected": self._connected,
+            "live": self.is_live(),
+            "universe": len(self._universe),
+            "intervals": self._intervals(),
+            "cached_symbols": len(self._bars),
+            "cached_per_interval": intervals,
+            "needs_reseed": self._needs_reseed,
+            "last_msg_age_s": round(now - self._last_msg_ts, 1) if self._last_msg_ts else None,
+            "messages": self._msg_count,
+            # v5.14
+            "prices_cached": len(prices),
+            "prices_fresh": fresh_prices,
+            "coverage_pct": round(self.coverage() * 100, 1),
+            "seeding": self._seed_busy,
+        }
 
 
 # Singleton

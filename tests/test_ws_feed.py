@@ -237,10 +237,13 @@ def test_reseed_bypasses_cache(monkeypatch, feed):
 
 
 def test_update_universe_reconnects_when_changed(feed):
+    """v5.14: universe change reconnects but does NOT force a full REST
+    reseed of existing series (that was a hidden hourly weight drain) -
+    new symbols are pace-seeded by _seed_missing() instead."""
     feed._started = True
     feed.update_universe(["BTCUSDT", "ETHUSDT"])
     assert feed._universe == ["BTCUSDT", "ETHUSDT"]
-    assert feed._needs_reseed is True
+    assert feed._needs_reseed is False
     feed._started = False
 
 

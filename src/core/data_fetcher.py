@@ -71,8 +71,10 @@ class DataFetcher:
                 # impossible - serve the slightly stale WS series (WS events
                 # keep flowing; REST bans do not touch the WS service).
                 # A few-hours-old 4h candle set beats an aborted cycle.
+                # v5.14: serve during ANY active cooldown (was > 60s) - short
+                # shared-IP pressure pauses must not poke REST either.
                 from src.core.rate_limiter import rate_limiter
-                if rate_limiter.cooldown_remaining() > 60.0:
+                if rate_limiter.cooldown_remaining() > 0.0:
                     stale = ws_feed.get_cached(
                         symbol, limit, interval=interval,
                         allow_stale=True, max_age_s=6 * 3600.0,
@@ -194,21 +196,40 @@ class DataFetcher:
     @staticmethod
     def get_batch_prices(symbols: List[str],
                          priority: bool = False) -> Dict[str, float]:
-        """v5: {symbol: lastPrice} for a symbol list - 1 request, weight 2-4.
+        """v5: {symbol: lastPrice} for a symbol list.
 
-        v5.10: successful results are remembered in a last-known cache so
-        the dashboard can still show P&L (slightly stale, clearly logged)
-        during rate-limit cooldowns instead of showing nothing.
+        v5.14 WS-FIRST: live prices come from the miniTicker WS streams
+        (ZERO REST weight, ~1 update/s per symbol) and REST is contacted
+        ONLY for symbols the feed cannot serve. WS keeps flowing during a
+        429/418 ban, so position watch / dashboard P&L / pending fills stay
+        fully live while REST is banned - the old path fell back to stale
+        last-known prices instead.
         """
-        out = {}
-        for sym, t in DataFetcher.get_batch_tickers(symbols, priority=priority).items():
-            try:
-                price = float(t.get("lastPrice", t.get("price", 0)))
-            except (TypeError, ValueError):
-                continue
-            if price > 0:
+        if not symbols:
+            return {}
+        out: Dict[str, float] = {}
+        missing = list(dict.fromkeys(symbols))
+        # 1) live WS prices (free)
+        try:
+            from src.core.ws_feed import ws_feed
+            ws_prices = ws_feed.get_live_prices(symbols)
+            for sym, price in ws_prices.items():
                 out[sym] = price
                 DataFetcher._LAST_PRICES[sym] = (time.time(), price)
+            missing = [s for s in missing if s not in out]
+        except Exception:
+            missing = list(dict.fromkeys(symbols))
+        # 2) REST only for the gaps (weight 2-4 per batched request)
+        if missing:
+            for sym, t in DataFetcher.get_batch_tickers(
+                    missing, priority=priority).items():
+                try:
+                    price = float(t.get("lastPrice", t.get("price", 0)))
+                except (TypeError, ValueError):
+                    continue
+                if price > 0:
+                    out[sym] = price
+                    DataFetcher._LAST_PRICES[sym] = (time.time(), price)
         return out
 
     @staticmethod

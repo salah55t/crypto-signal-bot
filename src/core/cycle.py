@@ -456,23 +456,48 @@ def open_new_positions(recommendations: List[Dict]) -> int:
 # ------------------------------------------------------------------
 # FULL CYCLE
 # ------------------------------------------------------------------
-def rate_limit_gate() -> bool:
-    """True when this cycle should SKIP because of active rate limiting.
+def rate_limit_gate() -> str:
+    """v5.14 three-way gate: "run" | "degraded" | "skip".
 
-    Distinguishes "rate-limited (transient - next cron tick retries)" from
-    "network down" so the log stops showing a misleading network error when
-    the limiter itself is protecting the shared IP (429/418 backoff).
+    - "run"      : no cooldown - normal cycle (REST available).
+    - "degraded" : a 429/418 or shared-IP cooldown is active BUT the WS
+                   feed is connected and covers the universe - run the
+                   cycle ENTIRELY off the live WS cache (zero REST weight;
+                   REST bans do not touch the WS service).
+    - "skip"     : cooldown active and the WS cache cannot cover the
+                   universe - idle until the next cron tick (old behavior).
     """
     from src.core.rate_limiter import rate_limiter
     remaining = rate_limiter.cooldown_remaining()
-    if remaining > 0:
-        log.warning(
-            f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left) - "
-            f"skipping this cycle (429/418 or shared-IP pressure); "
-            f"next cron tick retries automatically[/]"
-        )
-        return True
-    return False
+    if remaining <= 0:
+        return "run"
+    if settings.USE_WS_FEED:
+        try:
+            from src.core.ws_feed import ws_feed
+            if ws_feed.is_live():
+                cov = ws_feed.coverage()
+                if cov >= max(0.0, settings.WS_DEGRADED_COVERAGE):
+                    log.warning(
+                        f"[yellow]Rate-limit cooldown active "
+                        f"({remaining:.0f}s left)[/] - [cyan]running WS-only "
+                        f"cycle[/] (coverage {cov:.0%}, zero REST weight - "
+                        f"WebSocket streams bypass the REST ban)"
+                    )
+                    return "degraded"
+                log.warning(
+                    f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left)[/] - "
+                    f"skipping this cycle (WS coverage {cov:.0%} < "
+                    f"{settings.WS_DEGRADED_COVERAGE:.0%}); next cron tick retries"
+                )
+                return "skip"
+        except Exception:
+            pass
+    log.warning(
+        f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left) - "
+        f"skipping this cycle (429/418 or shared-IP pressure); "
+        f"next cron tick retries automatically[/]"
+    )
+    return "skip"
 
 
 def _binance_reachable(retries: int = 2, grace: float = 5.0) -> bool:
@@ -487,16 +512,26 @@ def _binance_reachable(retries: int = 2, grace: float = 5.0) -> bool:
 
 
 def run_analysis_cycle():
-    """One full bot cycle: manage -> analyze -> manage(signals) -> notify -> open."""
+    """One full bot cycle: manage -> analyze -> manage(signals) -> notify -> open.
+
+    v5.14: during a REST rate ban the cycle still runs ("degraded") when
+    the WS feed covers the universe - candles AND prices both come from
+    WebSocket streams that Binance does not count against the REST budget.
+    """
     log.info("=" * 60)
     log.info("[bold cyan]STARTING ANALYSIS CYCLE (v5)[/]")
     log.info("=" * 60)
 
     # ---- STEP 0: rate-limit gate (429/418 or shared-IP pressure) ----
-    if rate_limit_gate():
+    gate = rate_limit_gate()
+    ws_only = (gate == "degraded")
+    if gate == "skip":
         return
 
-    if not _binance_reachable():
+    # v5.14: a REST ping during a ban is exactly the poke we must avoid;
+    # in degraded mode the whole cycle is WS-fed and needs no reachability
+    # check (WS connectivity is verified by ws_feed.is_live() in the gate).
+    if not ws_only and not _binance_reachable():
         log.error("[red]Cannot reach Binance API[/] - check network or VPN")
         return
 
@@ -506,17 +541,20 @@ def run_analysis_cycle():
     # v5.4: also run the market cycle via the leader coins (BTC/ETH/SOL/XRP)
     # - trend/RSI/momentum read + market-wide verdict + the human-readable
     # classification file (data/market_groups.txt) refreshed every hour.
-    try:
-        from src.analysis.market_map import market_map
-        market_map.get_map()
-        mk = (market_map.run_market_cycle() or {}).get("market") or {}
-        if mk:
-            log.info(
-                f"[bold cyan]Market posture:[/] {mk.get('verdict')} "
-                f"({mk.get('score')}/100) - {mk.get('posture_ar')}"
-            )
-    except Exception as e:
-        log.debug(f"Market map pre-warm skipped: {e}")
+    # v5.14: skipped in degraded mode - the cached map stays authoritative
+    # and no REST rebuild is poked while a ban is active.
+    if not ws_only:
+        try:
+            from src.analysis.market_map import market_map
+            market_map.get_map()
+            mk = (market_map.run_market_cycle() or {}).get("market") or {}
+            if mk:
+                log.info(
+                    f"[bold cyan]Market posture:[/] {mk.get('verdict')} "
+                    f"({mk.get('score')}/100) - {mk.get('posture_ar')}"
+                )
+        except Exception as e:
+            log.debug(f"Market map pre-warm skipped: {e}")
 
     cycle_start = time.time()
 
@@ -535,7 +573,7 @@ def run_analysis_cycle():
             log.debug(f"Regime router skipped: {e}")
 
     # ---- STEP 2: market analysis ----
-    recommendations = analyzer_analyze()
+    recommendations = analyzer_analyze(ws_only=ws_only)
 
     # v5.12: the burst was aborted mid-way by a Binance 429/418 ban. The
     # last good recommendations snapshot is untouched; sending "no signals"
@@ -600,7 +638,11 @@ def run_analysis_cycle():
     )
 
 
-def analyzer_analyze():
-    """Lazy import to avoid circulars (analyzer imports scorer chains)."""
+def analyzer_analyze(ws_only: bool = False):
+    """Lazy import to avoid circulars (analyzer imports scorer chains).
+
+    v5.14: `ws_only=True` runs the whole burst off the WS candle cache with
+    order books skipped (zero REST weight) - used while a rate ban is active.
+    """
     from src.analysis.analyzer import analyzer
-    return analyzer.analyze_all(parallel=True)
+    return analyzer.analyze_all(parallel=True, ws_only=ws_only)

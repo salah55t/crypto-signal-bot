@@ -92,12 +92,20 @@ def test_429_keeps_short_backoff(monkeypatch):
 # ---------- cycle gate ----------
 
 def test_rate_limit_gate_skips_during_cooldown(monkeypatch):
+    """v5.14: the gate is three-way ("run"/"degraded"/"skip").
+
+    With the real singleton limiter and a DISABLED ws feed (or zero
+    coverage), an active cooldown still skips the cycle exactly as before.
+    """
     from src.core import cycle
+    from config.settings import settings as _s
     monkeypatch.setattr(rate_limiter, "_cooldown_until", 0.0)  # reset
-    assert cycle.rate_limit_gate() is False
+    monkeypatch.setattr(_s, "USE_WS_FEED", False)  # no WS fallback available
+    assert cycle.rate_limit_gate() == "run"
 
     rate_limiter.trigger_cooldown(120)
-    assert cycle.rate_limit_gate() is True
+    assert cycle.rate_limit_gate() == "skip"
+    rate_limiter._cooldown_until = 0.0  # don't leak the cooldown into other test files
 
 
 def test_health_exposes_rate_limit_state():
