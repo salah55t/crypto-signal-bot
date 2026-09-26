@@ -5,7 +5,7 @@ across all configured symbols.
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from config.settings import settings
@@ -16,6 +16,10 @@ from src.utils.logger import log
 from src.utils.helpers import save_json, now_utc, to_json_safe
 
 RECOMMENDATIONS_FILE = Path("data/recommendations.json")
+# v5.15: last good dynamic USDT universe persisted to disk - a restart during
+# a REST ban boots from this cache instead of poking a banned IP with a
+# /ticker/24hr (weight 80) request.
+SYMBOLS_CACHE_FILE = Path("data/symbols_cache.json")
 
 
 def _ban_active(threshold: float = 130.0) -> bool:
@@ -113,8 +117,81 @@ class MarketAnalyzer:
                 f"{len(self.symbols)} symbols from config/coins.yaml"
             )
 
+    def _load_symbols_cache(self) -> Optional[List[str]]:
+        """v5.15: last good dynamic USDT pair list from disk (ban-safe boot).
+
+        data/symbols_cache.json = {"symbols": [...], "saved_at": iso, ...
+        Accepted while younger than settings.SYMBOLS_CACHE_MAX_AGE_H so a
+        restart during a REST ban keeps the FULL dynamic universe instead of
+        silently shrinking to the static coins.yaml list.
+        """
+        try:
+            from src.utils.helpers import load_json, now_utc
+            payload = load_json(SYMBOLS_CACHE_FILE, default=None)
+            if not isinstance(payload, dict):
+                return None
+            syms = payload.get("symbols")
+            saved = payload.get("saved_at")
+            if not isinstance(syms, list) or not syms:
+                return None
+            if saved:
+                saved_dt = datetime.fromisoformat(str(saved))
+                if saved_dt.tzinfo is None:  # tolerate naive timestamps
+                    saved_dt = saved_dt.replace(tzinfo=timezone.utc)
+                age_h = (now_utc() - saved_dt).total_seconds() / 3600.0
+                if age_h > max(1.0, float(getattr(
+                    settings, "SYMBOLS_CACHE_MAX_AGE_H", 168
+                ))):
+                    return None
+            return [str(s) for s in syms if s]
+        except Exception:
+            return None
+
+    def _save_symbols_cache(self, symbols: List[str]) -> None:
+        """v5.15: persist the dynamic universe so restarts don't need REST."""
+        try:
+            save_json(
+                {
+                    "symbols": list(symbols),
+                    "saved_at": now_utc().isoformat(),
+                    "count": len(symbols),
+                },
+                SYMBOLS_CACHE_FILE,
+            )
+        except Exception as e:
+            log.debug(f"Symbols cache write failed: {e}")
+
     def _fetch_all_usdt_pairs(self) -> list:
-        """Fetch all USDT spot pairs from Binance, filtered by volume."""
+        """Fetch all USDT spot pairs from Binance, filtered by volume.
+
+        v5.15: BAN-SAFE. Called from __init__ (import time!) and every
+        SYMBOL_REFRESH_MIN - both fire straight into a still-active Binance
+        418 after any restart, because the old code had no ban guard and the
+        in-memory cooldown died with the previous process. Now:
+          - ban active  -> disk cache (<= 7 days old) or static coins, and
+                           ZERO network weight is spent (no 80w /ticker/24hr
+                           into a banned IP, no ERROR spam - a ban is an
+                           expected state, not a failure);
+          - fetch OK    -> universe persisted to data/symbols_cache.json;
+          - fetch fails -> previous fallback (static list), ERROR only when
+                           no ban is active (a genuine network problem).
+        """
+        if _ban_active():
+            cached = self._load_symbols_cache()
+            if cached:
+                log.info(
+                    f"[cyan]Symbols[/] REST ban active - using disk-cached "
+                    f"universe ({len(cached)} pairs, no REST request sent)"
+                )
+                return [s for s in cached if s not in self.excluded]
+            static = [s for s in settings.load_coins() if s not in self.excluded]
+            log.info(
+                f"[cyan]Symbols[/] REST ban active and no cache yet - "
+                f"starting from the static coins.yaml list "
+                f"({len(static)} pairs, no REST request sent); the dynamic "
+                f"universe loads after the ban lifts"
+            )
+            return static
         try:
             from src.core.binance_client import binance_client
             tickers = binance_client.get_all_tickers()
@@ -130,10 +207,21 @@ class MarketAnalyzer:
                 key=lambda t: float(t.get("quoteVolume", 0)),
                 reverse=True,
             )
-            return [t["symbol"] for t in sorted_pairs[:settings.MAX_SYMBOLS]]
+            pairs = [t["symbol"] for t in sorted_pairs[:settings.MAX_SYMBOLS]]
+            self._save_symbols_cache(pairs)  # v5.15: ban-safe boots later
+            return pairs
         except Exception as e:
-            log.error(f"Failed to fetch USDT pairs: {e}")
-            # Fallback to static list
+            if _ban_active():  # ban went active mid-request - expected, quiet
+                log.warning(
+                    f"Symbol fetch hit an active rate ban - keeping the "
+                    f"current/static list ({e})"
+                )
+            else:
+                log.error(f"Failed to fetch USDT pairs: {e}")
+            # Fallback order: disk cache first (v5.15), then static list
+            cached = self._load_symbols_cache()
+            if cached:
+                return [s for s in cached if s not in self.excluded]
             return [s for s in settings.load_coins() if s not in self.excluded]
 
     def refresh_symbols(self, force: bool = False):
@@ -142,8 +230,17 @@ class MarketAnalyzer:
         v5.3: cached for SYMBOL_REFRESH_MIN minutes. The old behaviour
         refetched /ticker/24hr (weight 80!) every cycle AND again from
         bottom_scanner.scan() - pure waste when symbols rarely churn.
+        v5.15: no-op while a REST ban is active - the current list is kept
+        untouched (and _symbols_ts is NOT bumped, so the refresh happens
+        automatically right after the ban lifts).
         """
         if not settings.USE_ALL_USDT_PAIRS:
+            return
+        if _ban_active():
+            log.debug(
+                "Symbol refresh skipped - REST ban active; will refresh "
+                "after the cooldown"
+            )
             return
         if not force and self._symbols_ts is not None:
             age = now_utc() - self._symbols_ts

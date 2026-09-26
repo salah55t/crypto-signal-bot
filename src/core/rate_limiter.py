@@ -10,11 +10,25 @@ Render free-tier egress IPs are SHARED between services, so our bot must:
 
 Used by BinanceClient before every outbound request.
 """
+import json
+import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 from src.utils.logger import log
+
+# v5.15: the cooldown survives process restarts. Binance 418 IP bans live on
+# BINANCE'S side (minutes..days for repeat offenders) - a Render deploy or
+# crash restart used to wipe our in-memory cooldown and the fresh process
+# immediately hammered the still-banned IP (production 2026-09-26: restart
+# during a ban -> /ticker/24hr -> fresh 418 -> 2476s re-cooldown). The state
+# file stores an EPOCH deadline (monotonic clocks are per-process).
+STATE_FILE = Path("data/rate_state.json")
+# Hard sanity cap: Binance never documents bans longer than 3 days; honouring
+# the server Retry-After fully (up to 24h) beats poking and EXTENDING the ban.
+COOLDOWN_HARD_CAP_S = 86400.0
 
 
 class RateLimitError(Exception):
@@ -64,6 +78,58 @@ class WeightedRateLimiter:
         self._cooldown_until = 0.0  # monotonic ts
         self._pressure_streak = 0
         self._last_pressure_ts = 0.0
+        # v5.15: restore a ban that was armed by a PREVIOUS process
+        self._restore_from_disk()
+
+    # ------------------------------------------------------------------
+    def _persist_state(self, seconds: float) -> None:
+        """Write the cooldown deadline to disk (epoch-based, atomic)."""
+        try:
+            path = STATE_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "cooldown_until_epoch": time.time() + float(seconds),
+                "armed_at_epoch": time.time(),
+                "last_seconds": round(float(seconds), 1),
+                "pid": os.getpid(),
+            }
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+        except Exception as e:  # persistence is best-effort, never fatal
+            log.debug(f"Rate-state persist failed: {e}")
+
+    def _restore_from_disk(self) -> None:
+        """v5.15: re-arm a cooldown armed by a PREVIOUS process (if still live).
+
+        The pid guard keeps same-process semantics intact: within ONE
+        process the in-memory state is authoritative (tests and any code
+        that builds throwaway limiter instances are unaffected); only a
+        genuinely NEW process (Render deploy, crash restart) inherits the
+        ban the old process armed.
+        """
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if int(payload.get("pid", -1)) == os.getpid():
+                return  # same process - in-memory state is authoritative
+            until_epoch = float(payload.get("cooldown_until_epoch", 0.0))
+        except Exception:
+            return  # missing/corrupt file - nothing to restore
+        remaining = until_epoch - time.time()
+        if remaining <= 1.0:
+            try:
+                os.remove(STATE_FILE)
+            except OSError:
+                pass
+            return
+        self._cooldown_until = time.monotonic() + remaining
+        log.warning(
+            f"[yellow]Rate limiter[/] restored cooldown from disk: "
+            f"{remaining:.0f}s left (previous process armed a 429/418 "
+            f"backoff - NOT poking the banned IP)"
+        )
 
     # ------------------------------------------------------------------
     def _prune(self, now: float) -> float:
@@ -130,7 +196,11 @@ class WeightedRateLimiter:
         v5.3: log only on transition into cooldown or a meaningful escalation
         (>= 30s added) - repeated 10/20s re-arms stay silent.
         """
-        seconds = max(1.0, min(float(seconds), 3600.0))
+        # v5.15: cap raised 3600 -> 86400. Binance 418 Retry-After values can
+        # exceed 1h for repeat offenders; re-poking after our (capped) cooldown
+        # only EXTENDED the ban. Call sites pre-cap their own semantics
+        # (429 keeps <= 3600, pressure keeps <= 300); this is a sanity bound.
+        seconds = max(1.0, min(float(seconds), COOLDOWN_HARD_CAP_S))
         now = time.monotonic()
         with self._lock:
             was_in_cooldown = now < self._cooldown_until
@@ -146,6 +216,14 @@ class WeightedRateLimiter:
                 f"[yellow]Rate limiter[/] global cooldown {seconds:.0f}s "
                 f"(server 429/418 or shared-IP pressure)"
             )
+        # v5.15: persist ONLY real extensions so a restart during a short
+        # pressure blip does not inherit a stale ban.
+        try:
+            min_s = float(getattr(_settings, "RATE_STATE_MIN_S", 60.0))
+        except Exception:
+            min_s = 60.0
+        if extended and seconds >= min_s:
+            self._persist_state(seconds)
 
     def pressure_streak(self) -> int:
         """Consecutive shared-IP pressure hits (for /api/health visibility)."""

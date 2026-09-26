@@ -233,6 +233,17 @@ class Settings:
     #    that collides with shared-IP pressure).
     WS_SEED_DELAY_S: float = float(os.getenv("WS_SEED_DELAY_S", "0.35"))
 
+    # --- v5.15 ban-survivor: state that outlives process restarts ---------
+    # The dynamic USDT universe is persisted to data/symbols_cache.json after
+    # every successful fetch; a restart during a REST 418/429 ban boots from
+    # this cache (accepted while younger than this many hours) instead of
+    # firing an 80-weight /ticker/24hr into the banned IP.
+    SYMBOLS_CACHE_MAX_AGE_H: float = float(os.getenv("SYMBOLS_CACHE_MAX_AGE_H", "168"))
+    # Cooldown state (data/rate_state.json) is written for any ban >= this
+    # many seconds - short shared-IP pressure blips are not worth inheriting
+    # across restarts.
+    RATE_STATE_MIN_S: float = float(os.getenv("RATE_STATE_MIN_S", "60"))
+
     # --- Position hygiene ---
     # Skip a recommendation if the same symbol already has an open position
     # (prevents duplicate entries on consecutive cycles)

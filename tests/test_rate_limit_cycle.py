@@ -23,11 +23,18 @@ def test_cooldown_remaining_zero_when_clear():
     assert lim.in_cooldown() is False
 
 
-def test_long_cooldown_capped_at_1h():
+def test_long_cooldown_capped_at_24h():
+    """v5.15: the sanity cap is now 24h (was 1h).
+
+    Binance 418 Retry-After values for repeat offenders exceed 1h; the old
+    1h cap made the bot re-poke the banned IP and EXTEND the ban. The 418
+    call site pre-caps its own semantics (>= 900s, honouring the server);
+    this is the last-resort bound only.
+    """
     lim = WeightedRateLimiter(budget_per_min=100)
-    lim.trigger_cooldown(7200)          # absurd value -> capped
+    lim.trigger_cooldown(200000)        # absurd value -> capped at 86400
     assert lim.in_cooldown() is True
-    assert 3500 < lim.cooldown_remaining() <= 3600
+    assert 86000 < lim.cooldown_remaining() <= 86400
 
 
 def test_cooldown_only_extends_never_shortens():

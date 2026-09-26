@@ -153,7 +153,10 @@ class BinanceClient:
                     # v5.2: IP auto-ban - Retry-After can be minutes..hours and
                     # every request sent during the ban can EXTEND it. Back off
                     # hard (>= 15 min) instead of poking it every cycle.
-                    cooldown = min(max(retry_after, 900.0), 3600.0)
+                    # v5.15: honour the server value up to 24h (repeat offenders
+                    # get multi-hour bans; the old 1h cap made us re-poke and
+                    # EXTEND the ban). Cooldown survives restarts (rate_state).
+                    cooldown = min(max(retry_after, 900.0), 86400.0)
                 else:
                     # v5.12: honor Retry-After FULLY. The old 120s cap made us
                     # poke a still-hot shared IP every 2 minutes, and Binance

@@ -23,6 +23,11 @@ data/models/*
 !data/models/.gitkeep
 data/recommendations.json
 data/open_positions.json
+# v5.15 ban-survivor runtime state (must never be committed - a stale
+# committed ban would freeze a freshly deployed bot)
+data/rate_state.json
+data/rate_state.tmp
+data/symbols_cache.json
 
 # Node
 node_modules/
