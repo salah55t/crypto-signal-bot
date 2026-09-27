@@ -48,6 +48,8 @@ from src.indicators.fibonacci import compute_fibonacci_levels, compute_entry_exi
 from src.indicators.ichimoku import ichimoku_state
 from src.indicators.elliott import detect_elliott_wave
 from src.analysis.confluence import confluence_engine
+from src.analysis.session_clock import entry_gate, session_info, \
+    strategy_session_weight
 from src.utils.logger import log
 
 
@@ -189,7 +191,13 @@ class SignalScorer:
         """
         Run all strategies on a symbol and produce a final score.
         Returns a comprehensive recommendation dict.
+
+        v5.16: pegged/quasi-stable symbols are hard-skipped before ANY
+        strategy runs (fees > movement = guaranteed slow bleed).
         """
+        if symbol in set(getattr(settings, "PEGGED_SYMBOLS", []) or []):
+            return {"symbol": symbol, "skip": True,
+                    "reason": "pegged/quasi-stable symbol (pinned price)"}
         if df is None or len(df) < 60:
             return {"symbol": symbol, "skip": True, "reason": "Insufficient data"}
 
@@ -260,6 +268,67 @@ class SignalScorer:
         atr_pct_total = atr_pct * 100
         volatility_extreme = atr_pct_total > settings.ATR_PCT_MAX
         dead_market = atr_pct_total < settings.ATR_PCT_MIN
+        dead_reason = "atr_floor" if dead_market else ""
+
+        # v5.16: STATISTICAL FLATNESS - the "semi-stable" coin killer.
+        # A pinned coin can pass a small ATR floor on a high timeframe;
+        # it can never pass a rolling RANGE check + per-bar movement check.
+        flat_market = False
+        rng_pct = None
+        try:
+            lb = max(20, int(getattr(settings, "FLAT_LOOKBACK", 48)))
+            tail = df.tail(lb)
+            rng_pct = ((float(tail["high"].max())
+                        - float(tail["low"].min()))
+                       / max(current_price, 1e-12)) * 100.0
+            tf_hint = ""
+            try:
+                # primary timeframe of this window (live passes settings
+                # TIMEFRAMES; the index only gives bar spacing)
+                tf_hint = str(settings.TIMEFRAMES[0]) if settings.TIMEFRAMES else ""
+            except Exception:
+                tf_hint = ""
+            flat_floor = float(
+                (settings.FLAT_RANGE_PCT_BY_TF or {}).get(
+                    tf_hint, settings.FLAT_RANGE_PCT_DEFAULT))
+            rets = tail["close"].pct_change().dropna()
+            mean_abs_ret = float(rets.abs().mean()) * 100.0 \
+                if len(rets) else 100.0
+            if rng_pct < flat_floor and \
+                    mean_abs_ret < float(getattr(
+                        settings, "FLAT_RETURN_ABS_MIN", 0.05)):
+                flat_market = True
+                dead_market = True
+                dead_reason = "flat/pinned"
+        except Exception:
+            pass
+
+        # v5.16: SESSION CLOCK - the fixed daily rhythm (exchange opens/
+        # closes). Tags every rec with its hour's session; hard-blocks NEW
+        # entries in the data-backed losing windows. Exits are never gated.
+        sinfo = session_info()
+        try:
+            if df.index is not None and len(df.index) > 0:
+                bar_ts = df.index[-1]
+                sinfo = session_info(getattr(bar_ts, "to_pydatetime",
+                                             lambda: bar_ts)())
+        except Exception:
+            pass
+        dom_sig = ""
+        try:
+            agreeing = [
+                s for s in signals
+                if s.direction == direction
+                and abs(float(s.score)) >= self.VOTE_THRESHOLD
+            ]
+            if agreeing:
+                dom_sig = max(agreeing,
+                              key=lambda s: abs(float(s.score))).strategy
+        except Exception:
+            dom_sig = ""
+        a_plus_flag = bool(decision.get("a_plus", False))
+        blocked, block_reason = entry_gate(sinfo, dom_sig, a_plus_flag)
+        sess_weight = strategy_session_weight(sinfo, dom_sig)
 
         return {
             "symbol": symbol,
@@ -278,6 +347,21 @@ class SignalScorer:
             "a_plus": decision.get("a_plus", False),
             "volatility_extreme": bool(volatility_extreme),
             "dead_market": bool(dead_market),
+            "dead_market_reason": dead_reason,
+            "flat_market": bool(flat_market),
+            "range_pct": (round(float(rng_pct), 3)
+                          if rng_pct is not None else None),
+            "session": {
+                "hour": sinfo.get("hour"),
+                "session": sinfo.get("session"),
+                "session_ar": sinfo.get("session_ar"),
+                "is_weekend": sinfo.get("is_weekend"),
+                "is_saturday": sinfo.get("is_saturday"),
+            },
+            "session_blocked": bool(blocked),
+            "session_block_reason": block_reason,
+            "session_weight": float(sess_weight),
+            "dominant_strategy": dom_sig,
             "atr_pct_total": float(atr_pct_total),
             "avg_strength": verdict["avg_strength"],
             "confluence": verdict["confluence"],
@@ -337,8 +421,11 @@ class SignalScorer:
         v5 veteran gates:
           - harmony >= MIN_HARMONY (layered agreement, not one loud layer)
           - volatility_extreme / dead_market symbols are dropped
-        Ranking = confidence + R/R bonus (capped 5) + harmony bonus (capped 4)
-        so complete setups outrank louder-but-lonesome signals.
+        v5.16: session-blocked recs (chop window / Saturday breakouts /
+        Monday-open reversals) are dropped; ranking is scaled by the
+        session weight so the right strategy owns the right hour.
+        Ranking = (confidence + R/R bonus (capped 5) + harmony bonus (capped 4))
+                  x session_weight
         """
         from config.settings import settings
 
@@ -354,13 +441,17 @@ class SignalScorer:
             and not (settings.EXCLUDE_VOLATILITY_EXTREME
                      and r.get("volatility_extreme", False))
             and not r.get("dead_market", False)
+            and not r.get("session_blocked", False)
         ]
-        # Composite rank: confidence + up to +5 for great R/R + up to +4 harmony
+        # Composite rank: confidence + up to +5 for great R/R + up to +4
+        # harmony, scaled by the v5.16 session weight (right hour, right
+        # strategy).
         filtered.sort(
             key=lambda r: (
-                r.get("confidence", 0)
-                + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0
-                + 4.0 * min(r.get("harmony", 0.0), 1.0)
+                (r.get("confidence", 0)
+                 + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0
+                 + 4.0 * min(r.get("harmony", 0.0), 1.0))
+                * float(r.get("session_weight", 1.0) or 1.0)
             ),
             reverse=True,
         )

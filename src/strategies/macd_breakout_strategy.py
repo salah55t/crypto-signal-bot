@@ -28,11 +28,12 @@ Automatic SELL/EXIT conditions (emitted as bearish signals):
 """
 import pandas as pd
 from typing import Dict, Optional
-from src.indicators.technical import ema, macd, atr
+from src.indicators.technical import ema, macd, atr, adx
 from src.strategies.base import BaseStrategy, Signal
 
 MIN_BARS = 80  # MACD(26+9) + EMA50 warmup
 RECENT_CROSS_BARS = 3
+BREAKOUT_LOOKBACK = 10   # v5.16: momentum must own the recent range
 
 
 class MACDBreakoutStrategy(BaseStrategy):
@@ -48,6 +49,7 @@ class MACDBreakoutStrategy(BaseStrategy):
 
         close = df["close"]
         volume = df["volume"]
+        high = df["high"]
 
         # === Signal Stack: one indicator per class ===
         macd_df = macd(close, 12, 26, 9)
@@ -56,6 +58,9 @@ class MACDBreakoutStrategy(BaseStrategy):
         hist = macd_df["histogram"]
         ema50 = ema(close, 50)
         atr_val = float(atr(df["high"], df["low"], close, 14).iloc[-1])
+        # v5.16: trend-strength gate (was missing entirely - the strategy
+        # fired mid-range MACD crosses in chop and bled, PF 0.97 over 90d)
+        adx_val = float(adx(df["high"], df["low"], close, 14)["adx"].iloc[-1])
 
         price = float(close.iloc[-1])
         e50 = float(ema50.iloc[-1])
@@ -71,7 +76,7 @@ class MACDBreakoutStrategy(BaseStrategy):
                       "liquidity": "Volume"},
             "price": price, "ema50": e50, "ema50_rising": e50_rising,
             "macd": line_now, "macd_signal": sig_now, "macd_hist": hist_now,
-            "volume_ratio": vol_ratio, "atr": atr_val,
+            "volume_ratio": vol_ratio, "atr": atr_val, "adx": adx_val,
         }
 
         # === EXIT SIDE (MACD bent down -> v5.5 immediate-close machinery) ===
@@ -89,7 +94,7 @@ class MACDBreakoutStrategy(BaseStrategy):
         score = 0
         reasons = []
 
-        # --- DIRECTION class (mandatory gate) ---
+        # --- DIRECTION class (mandatory gate, first per the stack order) ---
         # 3) price above EMA 50
         if price <= e50:
             return self._neutral(
@@ -97,8 +102,24 @@ class MACDBreakoutStrategy(BaseStrategy):
         score += 20
         reasons.append(f"Price above EMA50 ({e50:.4f})")
 
+        # --- v5.16 TREND-STRENGTH gate (mandatory) ---
+        # A MACD cross without emerging trend strength is chop noise - the
+        # 90-day diagnostic showed this exact failure (PF 0.97, 15 trades).
+        if adx_val < 20:
+            return self._neutral(
+                f"No trend strength (ADX={adx_val:.1f} < 20) - chop, not "
+                f"momentum", details)
+
+        # v5.16: range-ownership context - a BONUS, not a gate (the v5.7
+        # user spec explicitly wants the earliest ignition, cross below or
+        # just above zero). Momentum that already owns its 10-bar range is
+        # worth more; mid-range crosses keep firing but rank lower.
+        hh_prev = float(high.iloc[-(BREAKOUT_LOOKBACK + 1):-1].max())
+        owns_range = price > hh_prev
+
         # --- MOMENTUM class ---
-        # 1) MACD x signal cross (fresh = trigger, recent = still valid)
+        # 1) MACD x signal cross (fresh = trigger, recent = still valid;
+        #    both per the v5.7 user spec - earliest momentum ignition)
         fresh_cross_up = (line_prev <= sig_prev) and (line_now > sig_now)
         recent_cross_up = self._crossed_within(line, signal_line,
                                                RECENT_CROSS_BARS)
@@ -110,6 +131,11 @@ class MACDBreakoutStrategy(BaseStrategy):
             reasons.append(f"Recent MACD cross (<= {RECENT_CROSS_BARS} bars)")
         else:
             return self._neutral("No MACD bullish crossover", details)
+        if owns_range:
+            score += 6
+            reasons.append(
+                f"Owns the {BREAKOUT_LOOKBACK}-bar range "
+                f"({hh_prev:.4f} broken)")
 
         # cross location: below the zero line (earliest) or just above it
         if line_now < 0:
@@ -148,6 +174,10 @@ class MACDBreakoutStrategy(BaseStrategy):
         if e50_rising:
             score += 8
             reasons.append("EMA50 sloping up")
+        # v5.16 bonus: strong trend strength
+        if adx_val >= 25:
+            score += 6
+            reasons.append(f"Trend strength (ADX={adx_val:.1f})")
 
         score = max(-100, min(100, score))
 

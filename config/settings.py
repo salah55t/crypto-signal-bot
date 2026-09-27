@@ -244,6 +244,45 @@ class Settings:
     # across restarts.
     RATE_STATE_MIN_S: float = float(os.getenv("RATE_STATE_MIN_S", "60"))
 
+    # --- v5.16 session clock: the fixed daily rhythm of every desk --------
+    # Diagnostic (90d, 171 live-logic trades): hours 11-14 UTC (London close
+    # -> US pre-market) ran PF 0.05-0.79 over 54 trades; Asia hours 00-03
+    # ran PF 2.6-11. Entries only - exits are never session-gated.
+    SESSION_FILTER_ENABLED: bool = os.getenv(
+        "SESSION_FILTER_ENABLED", "true").lower() == "true"
+    # Hard entry blackout (UTC hours, comma list) - the chop window.
+    SESSION_BLOCK_HOURS: str = os.getenv("SESSION_BLOCK_HOURS", "11,12,13,14")
+    # Saturday is the thinnest day - block breakout/momentum NEW entries
+    # unless the rec is A+ (Sunday keeps the v5.13 weight cuts only).
+    SESSION_SATURDAY_BLOCK_BREAKOUTS: bool = os.getenv(
+        "SESSION_SATURDAY_BLOCK_BREAKOUTS", "true").lower() == "true"
+    # Mon 00:00-01:00 unwind: weekend wicks flush right after the weekly
+    # open - reversal (knife-catching) entries blocked, trends allowed.
+    SESSION_MONDAY_BLOCK_REVERSALS: bool = os.getenv(
+        "SESSION_MONDAY_BLOCK_REVERSALS", "true").lower() == "true"
+
+    # --- v5.16 pinned / quasi-stable coin protection -----------------------
+    # Pegged or fiat-quoted pairs move a few basis points a day - fees and
+    # spread alone guarantee a slow bleed. Hard-skipped before any analysis.
+    PEGGED_SYMBOLS: list = [s.strip().upper() for s in os.getenv(
+        "PEGGED_SYMBOLS",
+        "USDCUSDT,FDUSDUSDT,TUSDUSDT,USDPUSDT,DAIUSDT,EURUSDT,EURIUSDT,"
+        "AEURUSDT,USD1USDT,XUSDUSDT,USTCUSDT,FRAXUSDT,BUSDUSDT,PAXGUSDT,"
+        "XUSDUSDT,USDEUSDT,USDGUSDT,BUSDUSDT"
+    ).split(",") if s.strip()]
+    # Statistical flatness: rolling range % of the last FLAT_LOOKBACK bars.
+    # A "semi-stable" alt on 4h can pass a tiny ATR floor but never passes
+    # this. Keyed by primary timeframe (fallback: FLAT_RANGE_PCT_DEFAULT).
+    FLAT_LOOKBACK: int = int(os.getenv("FLAT_LOOKBACK", "48"))
+    FLAT_RANGE_PCT_BY_TF: dict = {
+        "15m": 0.8, "30m": 1.1, "1h": 1.6, "2h": 2.4, "4h": 3.8,
+        "6h": 5.0, "8h": 6.0, "12h": 8.0, "1d": 12.0,
+    }
+    FLAT_RANGE_PCT_DEFAULT: float = float(os.getenv("FLAT_RANGE_PCT_DEFAULT", "1.6"))
+    # Also require a minimum mean absolute per-bar return (%) - catches
+    # pinned coins whose range comes from a single old spike.
+    FLAT_RETURN_ABS_MIN: float = float(os.getenv("FLAT_RETURN_ABS_MIN", "0.05"))
+
     # --- Position hygiene ---
     # Skip a recommendation if the same symbol already has an open position
     # (prevents duplicate entries on consecutive cycles)

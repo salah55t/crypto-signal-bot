@@ -572,6 +572,16 @@ def run_analysis_cycle():
         except Exception as e:
             log.debug(f"Regime router skipped: {e}")
 
+    # ---- STEP 1.6: session clock (v5.16) - the fixed daily rhythm of
+    # every desk (daily open, London/NY opens and closes, weekend). Pure
+    # computation from the wall clock - zero REST weight.
+    if getattr(settings, "SESSION_FILTER_ENABLED", True):
+        try:
+            from src.analysis.session_clock import describe, session_info
+            log.info(f"[bold cyan]Session[/] {describe(session_info())}")
+        except Exception as e:
+            log.debug(f"Session clock skipped: {e}")
+
     # ---- STEP 2: market analysis ----
     recommendations = analyzer_analyze(ws_only=ws_only)
 

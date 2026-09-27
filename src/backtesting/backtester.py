@@ -283,6 +283,11 @@ class Backtester:
                 return False
             if rec.get("dead_market"):
                 return False
+            # v5.16: the session clock (chop window / Saturday breakouts /
+            # Monday-open reversals) gates NEW entries in the replay too,
+            # so the backtest validates the live behaviour.
+            if rec.get("session_blocked", False):
+                return False
         return True
 
     def _process_pending(self, bar, atr_val: float, i: int,
