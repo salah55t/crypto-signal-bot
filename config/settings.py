@@ -113,6 +113,12 @@ class Settings:
     # Momentum bypass: A+ setups / very high confidence enter at market even
     # above the zone (veterans chase ONLY the strongest momentum).
     PENDING_MOMENTUM_CONF: float = float(os.getenv("PENDING_MOMENTUM_CONF", "82"))
+    # v5.17: hard sanity cap on the momentum bypass - even an A+ setup pays
+    # at most this many ATRs above the zone; beyond it every entry waits
+    # for the pullback. Without the cap the bypass opened market positions
+    # 13-20% above their planned limit zone (confidence is regime-inflated).
+    PENDING_MOMENTUM_MAX_ATR: float = float(
+        os.getenv("PENDING_MOMENTUM_MAX_ATR", "1.0"))
 
     # --- v5 Market-aware position management (exits like a pro) ---
     # Take 50% off at TP1, move SL to break-even+fees, trail the rest to TP2.

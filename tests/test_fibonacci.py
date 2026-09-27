@@ -178,14 +178,20 @@ def test_entry_exit_bullish_consistency():
     out = compute_entry_exit("bullish", price, atr, SR_BULL, fib,
                              swing_low=price - 3, swing_high=95.0,
                              min_rr=1.5)
-    # Ordering invariants
-    assert out["stop_loss"] < price < out["take_profit"] <= out["take_profit_2"]
+    # v5.17: ordering invariants are anchored to the ENTRY the trade will
+    # actually pay (market -> current price, limit -> pocket level). For a
+    # limit rec the TP may legitimately sit between the fill and the
+    # analysis-time price.
+    ref = out["entry_price"]
+    assert out["stop_loss"] < ref <= out["take_profit"] <= out["take_profit_2"]
+    if out["entry_type"] == "market":
+        assert out["stop_loss"] < price < out["take_profit"]
     # v2 risk model preserved: SL distance clamped to [0.9, 2.2] x ATR
-    sl_dist = price - out["stop_loss"]
+    sl_dist = ref - out["stop_loss"]
     assert 0.9 * atr - 1e-9 <= sl_dist <= 2.2 * atr + 1e-9
-    # TP1 satisfies min R/R
+    # TP1 satisfies min R/R (measured from the entry)
     assert out["risk_reward_ratio"] >= 1.5
-    assert out["take_profit"] == pytest.approx(price + out["risk_reward_ratio"] * sl_dist)
+    assert out["take_profit"] == pytest.approx(ref + out["risk_reward_ratio"] * sl_dist)
     # TP2 beyond TP1
     assert out["take_profit_2"] > out["take_profit"]
     assert out["tp2_rr"] > out["risk_reward_ratio"]
@@ -240,8 +246,12 @@ def test_entry_exit_bearish_consistency():
     out = compute_entry_exit("bearish", price, atr, SR_BEAR, fib_down,
                              swing_low=price - 2, swing_high=price + 3,
                              min_rr=1.5)
-    assert out["take_profit_2"] <= out["take_profit"] < price < out["stop_loss"]
-    sl_dist = out["stop_loss"] - price
+    # v5.17: entry-anchored ordering (mirror of the bullish case)
+    ref = out["entry_price"]
+    assert out["take_profit_2"] <= out["take_profit"] <= ref < out["stop_loss"]
+    if out["entry_type"] == "market":
+        assert out["take_profit"] < price < out["stop_loss"]
+    sl_dist = out["stop_loss"] - ref
     assert 0.9 * atr - 1e-9 <= sl_dist <= 2.2 * atr + 1e-9
     assert out["risk_reward_ratio"] >= 1.5 - 1e-9
     assert out["tp2_rr"] > out["risk_reward_ratio"]
@@ -328,13 +338,19 @@ def test_scorer_output_has_fib_entry_exit_fields():
     fib_block = res["fibonacci"]
     assert "impulse" in fib_block
     assert "retracements" in fib_block and "extensions" in fib_block
-    # consistency: bullish -> SL below price, TP1/TP2 above
+    # v5.17 consistency: geometry anchored to the ENTRY. Market entries
+    # keep the old current-price relations; limit entries carry the SL
+    # below the pocket fill and a TP that may sit between fill and price.
     if res["direction"] == "bullish":
-        assert res["stop_loss"] < res["current_price"] < res["take_profit"]
-        assert res["take_profit_2"] >= res["take_profit"]
+        assert res["stop_loss"] < res["entry_price"]
+        assert res["entry_price"] <= res["take_profit"] <= res["take_profit_2"]
+        if res["entry_type"] == "market":
+            assert res["stop_loss"] < res["current_price"] < res["take_profit"]
     elif res["direction"] == "bearish":
-        assert res["stop_loss"] > res["current_price"] > res["take_profit"]
-        assert res["take_profit_2"] <= res["take_profit"]
+        assert res["stop_loss"] > res["entry_price"]
+        assert res["entry_price"] >= res["take_profit"] >= res["take_profit_2"]
+        if res["entry_type"] == "market":
+            assert res["stop_loss"] > res["current_price"] > res["take_profit"]
 
 
 def test_scorer_rr_still_enforced():

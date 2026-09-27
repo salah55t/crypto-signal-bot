@@ -262,10 +262,18 @@ class MarketAnalyzer:
         v5.14: `ws_only=True` (degraded cycle during a REST ban) skips the
         order book fetch (weight 5) - candles come from the WS cache, so
         the symbol costs ZERO REST weight.
+        v5.17: a REST ban no longer aborts ws_only bursts. The old
+        unconditional `_ban_active()` check killed every symbol even in
+        ws_only mode, so the degraded cycle ("zero REST weight") aborted
+        80/80 symbols the moment it started - the WS cache (a separate
+        stream that bypasses the REST budget) was paid for and never used.
         """
         # v5.12: mid-burst ban - fail this symbol WITHOUT a doomed network
         # attempt and flag the reason so analyze_all can abort the burst.
-        if _ban_active():
+        # v5.17: ws_only mode costs zero REST (candles from the WS cache
+        # served stale during the ban, order book + symbol refresh skipped),
+        # so the ban check only applies to REST-capable bursts.
+        if _ban_active() and not ws_only:
             return {"symbol": symbol, "skip": True, "reason": "rate ban"}
         try:
             # Fetch multi-timeframe candles
@@ -367,7 +375,9 @@ class MarketAnalyzer:
         # Overwriting data/recommendations.json with an empty/parital run
         # used to blank the dashboard and trigger "No strong signals" while
         # the real problem was the ban, not the market.
-        if ban_skips >= 3 or (ban_skips > 0 and _ban_active()):
+        # v5.17: ws_only bursts are immune - they spend zero REST weight,
+        # so there is nothing a REST ban can abort in them.
+        if not ws_only and (ban_skips >= 3 or (ban_skips > 0 and _ban_active())):
             self.last_run_aborted = True
             log.warning(
                 f"[yellow]Analysis burst ABORTED by Binance rate ban "

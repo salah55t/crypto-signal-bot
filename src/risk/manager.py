@@ -269,6 +269,23 @@ class RiskManager:
             reasons.append(f"Expected rise too low ({rec['expected_rise_pct']:.2f}%)")
         if rec.get("stop_loss", 0) <= 0:
             reasons.append("Invalid stop loss")
+        # v5.17: geometry coherence - a long whose stop sits at/above the
+        # price it would actually pay (and the mirror for shorts) would be
+        # closed by the watcher on tick 1 ("Stop Loss Hit" at ~entry).
+        # compute_entry_exit now anchors limit-rec SLs to the fill price;
+        # this catch-all rejects any other path that still produces an
+        # incoherent rec instead of opening a self-destructing position.
+        _sl = float(rec.get("stop_loss") or 0)
+        _cur = float(rec.get("current_price") or 0)
+        if _sl > 0 and _cur > 0:
+            if rec.get("direction") == "bullish" and _sl >= _cur:
+                reasons.append(
+                    f"Incoherent stop (SL {_sl:.6g} >= entry {_cur:.6g} "
+                    f"for a long)")
+            elif rec.get("direction") == "bearish" and _sl <= _cur:
+                reasons.append(
+                    f"Incoherent stop (SL {_sl:.6g} <= entry {_cur:.6g} "
+                    f"for a short)")
         # v5: layered harmony gate - a veteran requires layered agreement.
         # v5.6: bottom-boosted recs are EXEMPT - they carry their own layered
         # gate (bounce score >= BOTTOM_STRONG_SCORE + bullish close + RR) and

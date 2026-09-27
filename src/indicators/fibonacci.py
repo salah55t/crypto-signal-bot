@@ -201,13 +201,8 @@ def compute_entry_exit(direction: str, current_price: float, atr_val: float,
 
     # ---------------- Bullish ----------------
     if direction == "bullish":
-        # --- Stop loss: below structure, clamped (v2 risk model) ---
-        struct_dist = (current_price - swing_low) + 0.4 * atr_val
-        sl_dist = min(max(struct_dist, 0.9 * atr_val), 2.2 * atr_val)
-        stop_loss = current_price - sl_dist
-        notes.append(f"SL below 10-bar swing low {swing_low:.6g} + 0.4 ATR buffer")
-
-        # --- Entry zone: golden pocket ---
+        # --- Entry zone: golden pocket (computed FIRST - v5.17 anchors the
+        # whole geometry to the price the trade will ACTUALLY pay) ---
         if impulse == "up":
             entry_zone = {"low": gz_low, "high": gz_high}
             # pocket fib levels (0.5 and 0.618) - possible confluence anchors
@@ -242,30 +237,52 @@ def compute_entry_exit(direction: str, current_price: float, atr_val: float,
                 entry_label += " + support confluence"
                 notes.append("Reversal entry coincides with support level")
 
-        # --- Targets: first structure levels above price ---
+        # --- Stop loss: anchored to the ENTRY (v5.17 coherence fix) ---
+        # A limit fill happens at entry_price, possibly far below the price
+        # the analysis saw. Measuring SL from current_price produced the
+        # "SL above the fill" incoherence (e.g. SOLUSDT 2026-09-27: entry
+        # zone 106.9-110.4 with SL 119.3 - a pending fill at the pocket
+        # would have been stopped out on tick 1). Anchored to entry_ref:
+        # below the entry + 0.4 ATR structure buffer, clamped [0.9, 2.2]xATR
+        # (v2 risk model preserved). When the pocket sits below the 10-bar
+        # swing low the raw distance goes negative and the clamp degrades
+        # gracefully to ~0.9xATR below the pocket - the classic pocket
+        # invalidation stop. Market entries (entry == current) are unchanged.
+        entry_ref = float(entry_price)
+        struct_dist = (entry_ref - swing_low) + 0.4 * atr_val
+        sl_dist = min(max(struct_dist, 0.9 * atr_val), 2.2 * atr_val)
+        stop_loss = entry_ref - sl_dist
+        if entry_type == "market":
+            notes.append(f"SL below 10-bar swing low {swing_low:.6g} + 0.4 ATR buffer")
+        else:
+            notes.append(
+                f"SL anchored to limit entry {entry_ref:.6g} "
+                f"(pocket invalidation, clamped [0.9, 2.2]xATR)")
+
+        # --- Targets: first structure levels above the ENTRY ---
         targets: List[Tuple[float, str]] = []
         if impulse == "up":
-            if fib["swing_high"] > current_price * 1.001:
+            if fib["swing_high"] > entry_ref * 1.001:
                 targets.append((fib["swing_high"], "Fib 1.0 (swing high)"))
             for e in ("1.272", "1.414", "1.618"):
                 p = fib["extensions"][e]
-                if p > current_price * 1.001:
+                if p > entry_ref * 1.001:
                     targets.append((p, f"Fib {e} extension"))
         else:
             for r in ("0.382", "0.5", "0.618"):
                 p = fib["retracements"][r]
-                if p > current_price * 1.001:
+                if p > entry_ref * 1.001:
                     targets.append((p, f"Fib {r} retracement"))
         for i, r_lvl in enumerate(resistances):
-            if r_lvl > current_price * 1.001:
+            if r_lvl > entry_ref * 1.001:
                 targets.append((float(r_lvl), f"Resistance {i + 1}"))
         targets.sort(key=lambda t: t[0])
 
         tp1, tp1_label, tp2, tp2_label = _pick_targets(
-            current_price, sl_dist, targets, resistances, min_rr, below=False)
+            entry_ref, sl_dist, targets, resistances, min_rr, below=False)
 
-        tp1_dist = tp1 - current_price
-        tp2_dist = tp2 - current_price
+        tp1_dist = tp1 - entry_ref
+        tp2_dist = tp2 - entry_ref
         result = {
             "entry_price": float(entry_price),
             "entry_type": entry_type,
@@ -276,9 +293,9 @@ def compute_entry_exit(direction: str, current_price: float, atr_val: float,
             "take_profit_2": float(tp2),
             "risk_reward_ratio": float(tp1_dist / sl_dist) if sl_dist > 0 else 0.0,
             "tp2_rr": float(tp2_dist / sl_dist) if sl_dist > 0 else 0.0,
-            "sl_distance_pct": float(sl_dist / current_price * 100),
-            "tp_distance_pct": float(tp1_dist / current_price * 100),
-            "tp2_distance_pct": float(tp2_dist / current_price * 100),
+            "sl_distance_pct": float(sl_dist / entry_ref * 100) if entry_ref > 0 else 0.0,
+            "tp_distance_pct": float(tp1_dist / entry_ref * 100) if entry_ref > 0 else 0.0,
+            "tp2_distance_pct": float(tp2_dist / entry_ref * 100) if entry_ref > 0 else 0.0,
             "entry_label": entry_label,
             "tp1_label": tp1_label,
             "tp2_label": tp2_label,
@@ -287,13 +304,7 @@ def compute_entry_exit(direction: str, current_price: float, atr_val: float,
         return result
 
     # ---------------- Bearish ----------------
-    # --- Stop loss: above structure, clamped (v2 risk model) ---
-    struct_dist = (swing_high - current_price) + 0.4 * atr_val
-    sl_dist = min(max(struct_dist, 0.9 * atr_val), 2.2 * atr_val)
-    stop_loss = current_price + sl_dist
-    notes.append(f"SL above 10-bar swing high {swing_high:.6g} + 0.4 ATR buffer")
-
-    # --- Entry zone ---
+    # --- Entry zone (computed FIRST - v5.17 entry-anchored geometry) ---
     if impulse == "down":
         entry_zone = {"low": gz_low, "high": gz_high}
         pocket_levels = {k: v for k, v in fib["retracements"].items()
@@ -325,30 +336,44 @@ def compute_entry_exit(direction: str, current_price: float, atr_val: float,
             entry_label += " + resistance confluence"
             notes.append("Reversal entry coincides with resistance level")
 
-    # --- Targets below price ---
+    # --- Stop loss: anchored to the ENTRY (v5.17 coherence fix, mirror of
+    # the bullish branch) - a short limit fills at the pocket ABOVE the
+    # price the analysis saw, so the stop must sit above the FILL ---
+    entry_ref = float(entry_price)
+    struct_dist = (swing_high - entry_ref) + 0.4 * atr_val
+    sl_dist = min(max(struct_dist, 0.9 * atr_val), 2.2 * atr_val)
+    stop_loss = entry_ref + sl_dist
+    if entry_type == "market":
+        notes.append(f"SL above 10-bar swing high {swing_high:.6g} + 0.4 ATR buffer")
+    else:
+        notes.append(
+            f"SL anchored to limit entry {entry_ref:.6g} "
+            f"(pocket invalidation, clamped [0.9, 2.2]xATR)")
+
+    # --- Targets below the ENTRY ---
     targets = []
     if impulse == "down":
-        if fib["swing_low"] < current_price * 0.999:
+        if fib["swing_low"] < entry_ref * 0.999:
             targets.append((fib["swing_low"], "Fib 1.0 (swing low)"))
         for e in ("1.272", "1.414", "1.618"):
             p = fib["extensions"][e]
-            if p < current_price * 0.999:
+            if p < entry_ref * 0.999:
                 targets.append((p, f"Fib {e} extension"))
     else:
         for r in ("0.382", "0.5", "0.618"):
             p = fib["retracements"][r]
-            if p < current_price * 0.999:
+            if p < entry_ref * 0.999:
                 targets.append((p, f"Fib {r} retracement"))
     for i, s_lvl in enumerate(supports):
-        if s_lvl < current_price * 0.999:
+        if s_lvl < entry_ref * 0.999:
             targets.append((float(s_lvl), f"Support {i + 1}"))
     targets.sort(key=lambda t: t[0], reverse=True)  # closest below first
 
     tp1, tp1_label, tp2, tp2_label = _pick_targets(
-        current_price, sl_dist, targets, supports, min_rr, below=True)
+        entry_ref, sl_dist, targets, supports, min_rr, below=True)
 
-    tp1_dist = current_price - tp1
-    tp2_dist = current_price - tp2
+    tp1_dist = entry_ref - tp1
+    tp2_dist = entry_ref - tp2
     return {
         "entry_price": float(entry_price),
         "entry_type": entry_type,
@@ -359,9 +384,9 @@ def compute_entry_exit(direction: str, current_price: float, atr_val: float,
         "take_profit_2": float(tp2),
         "risk_reward_ratio": float(tp1_dist / sl_dist) if sl_dist > 0 else 0.0,
         "tp2_rr": float(tp2_dist / sl_dist) if sl_dist > 0 else 0.0,
-        "sl_distance_pct": float(sl_dist / current_price * 100),
-        "tp_distance_pct": float(tp1_dist / current_price * 100),
-        "tp2_distance_pct": float(tp2_dist / current_price * 100),
+        "sl_distance_pct": float(sl_dist / entry_ref * 100) if entry_ref > 0 else 0.0,
+        "tp_distance_pct": float(tp1_dist / entry_ref * 100) if entry_ref > 0 else 0.0,
+        "tp2_distance_pct": float(tp2_dist / entry_ref * 100) if entry_ref > 0 else 0.0,
         "entry_label": entry_label,
         "tp1_label": tp1_label,
         "tp2_label": tp2_label,

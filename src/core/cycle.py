@@ -396,6 +396,15 @@ def open_new_positions(recommendations: List[Dict]) -> int:
         # pocket are NOT chased - a pending order is armed instead.
         # Momentum bypass: A+ / very high confidence setups are the ONLY
         # ones allowed to enter at market above the zone.
+        # v5.17: the bypass gets a HARD sanity cap. Confidence is inflated
+        # by regime/confluence boosts (90%+ is common), so the old rule let
+        # "strong momentum" entries pay 13-20% above the planned limit zone
+        # (AVAX 2026-09-27: entry 11.17 vs zone 8.94-9.48 = +18%, GRAM +13%)
+        # with the SL structure still anchored near the market price - a
+        # terrible risk profile that showed up as "very poor" results on
+        # the dashboard. Now even an A+ setup pays at most
+        # PENDING_MOMENTUM_MAX_ATR above the zone; beyond it, EVERY entry
+        # waits for the pullback.
         if (settings.PENDING_ENTRIES_ENABLED
                 and rec.get("entry_type") == "limit"):
             zone = rec.get("entry_zone") or {}
@@ -408,10 +417,15 @@ def open_new_positions(recommendations: List[Dict]) -> int:
                                  rec.get("confidence", 0)) or 0)
                 >= settings.PENDING_MOMENTUM_CONF
             )
+            momentum_ok = (
+                strong_momentum
+                and price <= float(zone_high)
+                + settings.PENDING_MOMENTUM_MAX_ATR * atr
+            )
             if (zone_high and price and atr
                     and rec.get("direction") == "bullish"
                     and price > float(zone_high) + settings.PENDING_CHASE_ATR * atr
-                    and not strong_momentum):
+                    and not momentum_ok):
                 pending = risk_manager.add_pending_entry(
                     rec, "price above entry zone - waiting for pullback")
                 pending_symbols.add(symbol)
