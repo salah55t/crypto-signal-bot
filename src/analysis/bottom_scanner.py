@@ -52,6 +52,48 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
             "reason": f"Not near bottom (distance {bottom_check['distance_from_low_pct']:.1f}%)"
         }
 
+    # === v5.18: SEMI-STABLE / FEE-FOOD GATES (user rule) ===
+    # Bottom fishing a near-fixed coin is a guaranteed slow bleed:
+    # the 2.5x ATR target is smaller than round-trip fees + spread.
+    # XAUTUSDT (gold token) entered exactly this way on 2026-09-27 and
+    # paid 0.2% fees for a 0.13% move.
+    pre_atr = float(atr(high, low, close, 14).iloc[-1])
+    pre_atr_pct = pre_atr / max(current_price, 1e-12) * 100.0
+    if pre_atr_pct < settings.BOTTOM_MIN_ATR_PCT:
+        return {
+            "symbol": symbol, "skip": True,
+            "reason": (f"Semi-stable/dead coin (ATR {pre_atr_pct:.2f}% < "
+                       f"{settings.BOTTOM_MIN_ATR_PCT:.2f}% floor)")
+        }
+    tp_pct_gate = (pre_atr * 2.5) / max(current_price, 1e-12) * 100.0
+    if tp_pct_gate < settings.BOTTOM_MIN_TP_PCT:
+        return {
+            "symbol": symbol, "skip": True,
+            "reason": (f"TP inside fees ({tp_pct_gate:.2f}% < "
+                       f"{settings.BOTTOM_MIN_TP_PCT:.2f}%)")
+        }
+    # Statistical flatness (v5.16 thresholds, scanner-local copy): a coin
+    # can pass a small ATR floor yet never leave its rolling range.
+    try:
+        lb = max(20, int(getattr(settings, "FLAT_LOOKBACK", 48)))
+        tail = df.tail(lb)
+        rng_pct = ((float(tail["high"].max()) - float(tail["low"].min()))
+                   / max(current_price, 1e-12)) * 100.0
+        tf_hint = str(settings.TIMEFRAMES[0]) if settings.TIMEFRAMES else ""
+        flat_floor = float((settings.FLAT_RANGE_PCT_BY_TF or {}).get(
+            tf_hint, settings.FLAT_RANGE_PCT_DEFAULT))
+        rets = tail["close"].pct_change().dropna()
+        mean_abs_ret = (float(rets.abs().mean()) * 100.0) if len(rets) else 100.0
+        if rng_pct < flat_floor and \
+                mean_abs_ret < float(getattr(settings, "FLAT_RETURN_ABS_MIN", 0.05)):
+            return {
+                "symbol": symbol, "skip": True,
+                "reason": (f"Flat/pinned range ({rng_pct:.2f}% < "
+                           f"{flat_floor:.2f}% over {lb} bars)")
+            }
+    except Exception:
+        pass
+
     score = 30  # Base score for being near bottom
     signals = []
 
@@ -108,7 +150,7 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
     last_candle_bullish = bool(df["close"].iloc[-1] > df["open"].iloc[-1])
 
     # Compute suggested SL/TP using ATR
-    atr_val = float(atr(high, low, close, 14).iloc[-1])
+    atr_val = pre_atr  # v5.18: reuse the pre-gate ATR (identical value)
     sl_distance = atr_val * 1.2  # tighter SL for bottom fishing
     tp_distance = atr_val * 2.5
     stop_loss = current_price - sl_distance

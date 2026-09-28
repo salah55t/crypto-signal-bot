@@ -383,6 +383,14 @@ class RiskManager:
             "realized_pnl": 0.0,
             "partial_count": 0,
             "strategy": _primary_strategy(rec),
+            # v5.18: entry-coherence snapshot. Bottom-fishing positions are
+            # OPENED while the 4h Ichimoku regime is bearish (price under the
+            # cloud at a low). Without this snapshot the next cycle's
+            # structural exit read "still bearish" as "flipped bearish" and
+            # killed every bottom trade ~9 minutes after entry (fees won,
+            # trade lost - see XAUTUSDT/CRCLBUSDT/TRXUSDT on 2026-09-27).
+            "entry_ichimoku_regime": (rec.get("ichimoku") or {}).get("regime"),
+            "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
         }
         self.open_positions.append(position)
         save_json(self.open_positions, POSITIONS_FILE)
@@ -523,6 +531,9 @@ class RiskManager:
                 "realized_pnl": 0.0,
                 "partial_count": 0,
                 "strategy": _primary_strategy(rec),
+                # v5.18: entry-coherence snapshot (see open_paper_position)
+                "entry_ichimoku_regime": (rec.get("ichimoku") or {}).get("regime"),
+                "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
             }
             self.open_positions.append(position)
             save_json(self.open_positions, POSITIONS_FILE)
@@ -787,6 +798,31 @@ class RiskManager:
                     f"{pnl_pct:+.2f}% < {settings.TIME_STOP_MIN_PNL_PCT:.2f}%)")
         return None
 
+    @staticmethod
+    def _in_structural_grace(pos: Dict) -> bool:
+        """v5.18: True within STRUCTURAL_EXIT_GRACE_MIN of entry_time.
+
+        Regime/Kijun/Tenkan structural exits are suppressed during the
+        window; the hard SL and the >=55 opposite-signal exit stay armed.
+        Bottom-fishing entries need a few cycles before the 4h regime is
+        meaningful again - an instant next-cycle exit is churn, not risk
+        management.
+        """
+        grace_min = float(
+            getattr(settings, "STRUCTURAL_EXIT_GRACE_MIN", 30) or 0)
+        if grace_min <= 0:
+            return False
+        try:
+            et = pos.get("entry_time")
+            if not et:
+                return False
+            entry_dt = datetime.fromisoformat(str(et))
+            if entry_dt.tzinfo is None:
+                entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+            return (now_utc() - entry_dt).total_seconds() < grace_min * 60.0
+        except Exception:
+            return False
+
     def evaluate_structural_exit(self, pos: Dict, sig: Dict,
                                  current_price: float) -> Tuple[str, Optional[str]]:
         """
@@ -832,26 +868,45 @@ class RiskManager:
         kijun = icho.get("kijun")
         tenkan = icho.get("tenkan")
 
+        # v5.18: entry-coherence guards. A structural regime exit must mean
+        # "the thesis DIED", not "the thesis was never born": the regime has
+        # to differ from the entry snapshot, and the grace window right
+        # after entry suppresses regime/Kijun/Tenkan reactions entirely.
+        in_grace = self._in_structural_grace(pos)
+        entry_regime = pos.get("entry_ichimoku_regime")
+
         if direction == "bullish":
-            # 2) Ichimoku regime flipped bearish -> thesis dead, exit
+            # 2) Ichimoku regime flipped bearish -> thesis dead, exit.
+            #    v5.18: only a genuine FLIP vs the entry regime exits - a
+            #    bottom-fishing position opened under a bearish 4h regime
+            #    (price below the cloud at the low) no longer dies on the
+            #    next cycle just because the regime is still bearish.
             if regime == "bearish":
-                return ("exit", "Ichimoku regime flipped bearish")
+                if entry_regime != "bearish" and not in_grace:
+                    return ("exit", "Ichimoku regime flipped bearish")
+                return ("none", None)
             # 3) Regime decayed to neutral + price lost Kijun -> tighten to Kijun
-            if regime == "neutral" and icho.get("price_vs_kijun") == "below" and kijun:
+            if (regime == "neutral" and icho.get("price_vs_kijun") == "below"
+                    and kijun and not in_grace):
                 if kijun < current_price:
                     return ("tighten", f"Kijun defence ({kijun:.4f})")
             # 4) Fresh bearish TK cross -> tighten to Tenkan
-            if (icho.get("tk_cross_recent") == "bearish"
+            if (not in_grace
+                    and icho.get("tk_cross_recent") == "bearish"
                     and icho.get("tk_state") == "bearish" and tenkan
                     and tenkan < current_price):
                 return ("tighten", f"Tenkan cross-down defence ({tenkan:.4f})")
         else:
             if regime == "bullish":
-                return ("exit", "Ichimoku regime flipped bullish")
-            if regime == "neutral" and icho.get("price_vs_kijun") == "above" and kijun:
+                if entry_regime != "bullish" and not in_grace:
+                    return ("exit", "Ichimoku regime flipped bullish")
+                return ("none", None)
+            if (regime == "neutral" and icho.get("price_vs_kijun") == "above"
+                    and kijun and not in_grace):
                 if kijun > current_price:
                     return ("tighten", f"Kijun defence ({kijun:.4f})")
-            if (icho.get("tk_cross_recent") == "bullish"
+            if (not in_grace
+                    and icho.get("tk_cross_recent") == "bullish"
                     and icho.get("tk_state") == "bullish" and tenkan
                     and tenkan > current_price):
                 return ("tighten", f"Tenkan cross-up defence ({tenkan:.4f})")

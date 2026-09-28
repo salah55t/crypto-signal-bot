@@ -466,6 +466,21 @@ class MarketAnalyzer:
                     break
                 if c["symbol"] in existing_symbols:
                     continue
+                # v5.18: the session clock gates boosted entries too. The
+                # old path appended them AFTER filter_signals, so the chop
+                # window / Saturday / Monday-open blocks never applied to
+                # this channel (the Saturday-21:51 UTC losses leaked here).
+                try:
+                    from src.analysis.session_clock import entry_gate, session_info
+                    _blocked, _why = entry_gate(
+                        session_info(), "bottom_scanner_boost", False)
+                    if _blocked:
+                        log.info(
+                            f"[yellow]Bottom boost blocked[/] "
+                            f"{c['symbol']}: {_why}")
+                        continue
+                except Exception:
+                    pass
                 rec = build_bottom_rec(c)
                 # Boosted entries must clear the RR gate; their ADMISSION
                 # gate is the bounce score (applied in strong_bottoms) - not

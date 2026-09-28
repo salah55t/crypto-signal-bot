@@ -107,12 +107,17 @@ class TrendPullbackStrategy(BaseStrategy):
         # Price recovered above EMA 9
         recovered = current_price > e9 * 0.999
 
+        # v5.18: track whether an actual pullback happened - it is the
+        # PREMISE of this strategy, not a bonus.
+        has_pullback = False
         if pullback_to_ema21 and recovered:
             score += 25
             reasons.append(f"Pullback to EMA 21 ({e21:.4f}) + recovered")
+            has_pullback = True
         elif recent_low < e9 and recovered:
             score += 12
             reasons.append(f"Pullback to EMA 9 ({e9:.4f}) + recovered")
+            has_pullback = True
 
         # 4) Bullish reversal candle (Hammer, Engulfing, Piercing, Morning Star)
         last = df.iloc[-1]
@@ -172,9 +177,23 @@ class TrendPullbackStrategy(BaseStrategy):
         # Clamp
         score = max(-100, min(100, score))
 
-        # Need at least 50 points to trigger (4/5 checklist)
-        if score >= 50:
+        # v5.18: the entry TRIGGER is the pullback + the reversal candle.
+        # The old scoring could reach 63 points (uptrend 25 + ADX 15 +
+        # volume 10 + RSI 5 + MACD 8) with NO pullback and NO candle - a
+        # pure momentum chase that emitted a "full bullish" signal on
+        # 333/334 symbols in a strongly bearish regime and bought local
+        # tops. Restored checklist discipline:
+        #   FULL    = pullback present + reversal candle + score >= 50
+        #   PARTIAL = pullback present, no candle, score >= 30 (half conf)
+        #   else    = neutral (chase risk / no setup)
+        if has_pullback and bullish_candle and score >= 50:
             return self._bull(score, reasons, details)
-        elif score >= 30:
-            return self._bull(score * 0.5, [f"Partial signal: {r}" for r in reasons], details)
-        return self._neutral(f"Score too low ({score})", details)
+        if has_pullback and score >= 30:
+            if not bullish_candle:
+                reasons.append("No reversal candle - partial only")
+            return self._bull(score * 0.5,
+                              [f"Partial signal: {r}" for r in reasons], details)
+        return self._neutral(
+            "No pullback - chase risk"
+            if not has_pullback else f"Score too low ({score})",
+            details)

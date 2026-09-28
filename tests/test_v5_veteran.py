@@ -167,7 +167,11 @@ def test_young_trade_never_time_stopped(tmp_path, monkeypatch):
 
 def test_structural_exit_on_regime_flip(tmp_path, monkeypatch):
     rm = make_manager(tmp_path, monkeypatch)
-    pos = make_position()
+    # v5.18: age 1h - outside the new STRUCTURAL_EXIT_GRACE_MIN window (the
+    # old default age 0 sat inside it and the exit was correctly deferred).
+    # No entry_ichimoku_regime snapshot -> legacy semantics: regime flip
+    # exits.
+    pos = make_position(age_hours=1)
     sig = {"direction": "bullish", "confidence": 70,
            "ichimoku": {"regime": "bearish", "score": -55}}
     action, reason = rm.evaluate_structural_exit(pos, sig, 101.0)
@@ -186,7 +190,9 @@ def test_structural_exit_on_opposite_strong_signal(tmp_path, monkeypatch):
 
 def test_structural_tighten_to_kijun(tmp_path, monkeypatch):
     rm = make_manager(tmp_path, monkeypatch)
-    pos = make_position()
+    # v5.18: age 1h - outside the structural grace window (see
+    # test_structural_exit_on_regime_flip).
+    pos = make_position(age_hours=1)
     sig = {"direction": "bullish", "confidence": 70,
            "ichimoku": {"regime": "neutral", "price_vs_kijun": "below",
                         "kijun": 99.5}}

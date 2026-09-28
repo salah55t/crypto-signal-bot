@@ -90,8 +90,11 @@ class Settings:
     # agreement, not just a high single score.
     MIN_HARMONY: float = float(os.getenv("MIN_HARMONY", "0.45"))
     # Skip chaotic candles (ATR% of price above max) and dead markets (below min)
+    # v5.18: 0.12 -> 0.30 — on the 4h primary TF a 0.12% floor admits
+    # gold/pegged tokens (XAUTUSDT paid 0.2% fees for a 0.13% move).
+    # Real tradeable alts sit far above 0.5% ATR on 4h.
     ATR_PCT_MAX: float = float(os.getenv("ATR_PCT_MAX", "3.5"))
-    ATR_PCT_MIN: float = float(os.getenv("ATR_PCT_MIN", "0.12"))
+    ATR_PCT_MIN: float = float(os.getenv("ATR_PCT_MIN", "0.30"))
     EXCLUDE_VOLATILITY_EXTREME: bool = os.getenv(
         "EXCLUDE_VOLATILITY_EXTREME", "true").lower() == "true"
     # Market tide filter: block new longs when BTC regime is strongly bearish
@@ -355,6 +358,19 @@ class Settings:
     BOTTOM_MAX_PER_CYCLE: int = int(os.getenv("BOTTOM_MAX_PER_CYCLE", "2"))
     # Confidence cap for boosted entries so genuine strategy signals rank first
     BOTTOM_CONF_CAP: float = float(os.getenv("BOTTOM_CONF_CAP", "72"))
+    # v5.18: bottom-channel volatility floors (user rule: exclude semi-stable
+    # coins whose price is near-fixed). Scanned on TIMEFRAMES[0] (4h).
+    # XAUTUSDT (gold) runs ~0.2-0.4% ATR on 4h -> rejected; real alts > 1%.
+    BOTTOM_MIN_ATR_PCT: float = float(os.getenv("BOTTOM_MIN_ATR_PCT", "0.60"))
+    # v5.18: the 2.5x-ATR bottom TP must clear round-trip fees (0.2%) + edge.
+    # 0.9% minimum keeps every bottom trade worth taking after costs.
+    BOTTOM_MIN_TP_PCT: float = float(os.getenv("BOTTOM_MIN_TP_PCT", "0.90"))
+    # v5.18: grace window (minutes) after entry during which the Ichimoku
+    # regime / Kijun structural exits are suppressed (hard SL + opposite
+    # signal >= 55 stay armed). Prevents the next-cycle instant kill that
+    # closed every bottom-fishing trade ~9 minutes after entry.
+    STRUCTURAL_EXIT_GRACE_MIN: float = float(
+        os.getenv("STRUCTURAL_EXIT_GRACE_MIN", "30"))
 
     # --- Market Map: leader/follower correlation classification (v5.2) ---
     # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).
