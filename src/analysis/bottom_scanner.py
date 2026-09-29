@@ -149,13 +149,23 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
     # === Confirmation: last candle closed bullish (no falling knives) ===
     last_candle_bullish = bool(df["close"].iloc[-1] > df["open"].iloc[-1])
 
-    # Compute suggested SL/TP using ATR
+    # Compute suggested SL/TP using ATR.
+    # v5.19: two-target ladder instead of the old single day-scale TP.
+    # Production forensics (16 closed trades, all bottom_scanner_boost):
+    # avg MFE 0.60% while TP sat at 2.5x 4h-ATR (5-10% away) - trades
+    # covered 0-19% of the way to TP before churn killed them. TP1 now
+    # banks the bounce at BOTTOM_TP1_ATR_MULT (the veteran partial flow
+    # then moves SL to break-even), TP2 keeps the classic runner target.
+    # risk_reward_ratio stays computed on TP2 (the setup must still offer
+    # ~2R to the runner to clear the MIN_RR_RATIO gate).
     atr_val = pre_atr  # v5.18: reuse the pre-gate ATR (identical value)
     sl_distance = atr_val * 1.2  # tighter SL for bottom fishing
-    tp_distance = atr_val * 2.5
+    tp1_distance = atr_val * max(0.5, settings.BOTTOM_TP1_ATR_MULT)
+    tp2_distance = max(tp1_distance, atr_val * settings.BOTTOM_TP2_ATR_MULT)
     stop_loss = current_price - sl_distance
-    take_profit = current_price + tp_distance
-    rr_ratio = abs(take_profit - current_price) / max(abs(current_price - stop_loss), 0.0001)
+    take_profit = current_price + tp1_distance
+    take_profit_2 = current_price + tp2_distance
+    rr_ratio = abs(take_profit_2 - current_price) / max(abs(current_price - stop_loss), 0.0001)
 
     return {
         "symbol": symbol,
@@ -169,6 +179,7 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
         "atr_pct": float(atr_val / current_price * 100),
         "stop_loss": stop_loss,
         "take_profit": take_profit,
+        "take_profit_2": take_profit_2,
         "risk_reward_ratio": float(rr_ratio),
         "signals": signals,
         "bb_percent_b": pct_b,

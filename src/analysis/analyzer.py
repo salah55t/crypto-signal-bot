@@ -64,7 +64,11 @@ def build_bottom_rec(c: Dict) -> Dict:
         "expected_rise_pct": max(settings.MIN_EXPECTED_RISE,
                                   c["atr_pct"] * 1.8),  # ~1.8x ATR
         "stop_loss": c["stop_loss"],
+        # v5.19: TP1 = near bounce target (banks 50% via the veteran partial
+        # flow), TP2 = the classic 2.5x-ATR runner. The RR gate stays
+        # computed on TP2 (see bottom_scanner.score_bottom_candidate).
         "take_profit": c["take_profit"],
+        "take_profit_2": c.get("take_profit_2", c["take_profit"]),
         "risk_reward_ratio": c["risk_reward_ratio"],
         "atr": float(c.get("atr_pct", 0) * c["current_price"] / 100),
         "atr_pct": c["atr_pct"],

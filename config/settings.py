@@ -122,6 +122,14 @@ class Settings:
     # 13-20% above their planned limit zone (confidence is regime-inflated).
     PENDING_MOMENTUM_MAX_ATR: float = float(
         os.getenv("PENDING_MOMENTUM_MAX_ATR", "1.0"))
+    # v5.19: reach cap for pending entries. Production showed pendings armed
+    # with the golden pocket 4.9-5.0 ATR below price (AAVE/NVDABUSDT
+    # 2026-09-29) and a 4h TTL - a 5-ATR pullback inside 4 hours is a crash,
+    # not an entry, so those orders were guaranteed to expire unfilled while
+    # the strategy looked "weak". Zones farther than this many ATRs above
+    # the price drop the rec entirely; closer-but-far zones get a
+    # distance-scaled TTL (1x..4x PENDING_TTL_HOURS).
+    PENDING_REACH_MAX_ATR: float = float(os.getenv("PENDING_REACH_MAX_ATR", "3.0"))
 
     # --- v5 Market-aware position management (exits like a pro) ---
     # Take 50% off at TP1, move SL to break-even+fees, trail the rest to TP2.
@@ -371,6 +379,14 @@ class Settings:
     # closed every bottom-fishing trade ~9 minutes after entry.
     STRUCTURAL_EXIT_GRACE_MIN: float = float(
         os.getenv("STRUCTURAL_EXIT_GRACE_MIN", "30"))
+    # v5.19: bottom-trade TP ladder. The scanner fishes a 4h BOUNCE, but the
+    # old single TP at 2.5x ATR was a day-scale target: production showed
+    # avg MFE 0.60% vs a ~10% TP (trades covered 0-19% of the way) while the
+    # 30-min structural churn closed everything first. Now TP1 banks half
+    # the bounce at BOTTOM_TP1_ATR_MULT (veteran partial flow: SL -> BE),
+    # the runner aims for the classic 2.5x-ATR target (TP2).
+    BOTTOM_TP1_ATR_MULT: float = float(os.getenv("BOTTOM_TP1_ATR_MULT", "1.2"))
+    BOTTOM_TP2_ATR_MULT: float = float(os.getenv("BOTTOM_TP2_ATR_MULT", "2.5"))
 
     # --- Market Map: leader/follower correlation classification (v5.2) ---
     # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).

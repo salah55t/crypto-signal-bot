@@ -424,22 +424,42 @@ def open_new_positions(recommendations: List[Dict]) -> int:
             )
             if (zone_high and price and atr
                     and rec.get("direction") == "bullish"
-                    and price > float(zone_high) + settings.PENDING_CHASE_ATR * atr
-                    and not momentum_ok):
-                pending = risk_manager.add_pending_entry(
-                    rec, "price above entry zone - waiting for pullback")
-                pending_symbols.add(symbol)
-                if telegram_notifier.enabled:
-                    telegram_notifier.send_alert(
-                        f"أمر دخول معلق ⏳ {symbol}",
-                        f"منطقة الدخول: {pending['zone_low']:.4f} - "
-                        f"{pending['zone_high']:.4f}\n"
-                        f"الحالي: {price:.4f} (بانتظار ارتداد السعر للمنطقة)\n"
-                        f"وقف: {rec.get('stop_loss')} | TP1: {rec.get('take_profit')} "
-                        f"| TP2: {rec.get('take_profit_2')}\n"
-                        f"ينتهي خلال {settings.PENDING_TTL_HOURS:.0f} ساعة"
-                    )
-                continue
+                    and price > float(zone_high)
+                    + settings.PENDING_CHASE_ATR * atr):
+                # v5.19: reach gate. Production showed pendings armed with
+                # the golden pocket 4.9-5.0 ATR below price (AAVE/NVDABUSDT
+                # 2026-09-29) and a 4h TTL - a 5-ATR pullback inside 4 hours
+                # never happens, so the orders expired unfilled while the
+                # strategy looked "weak". Beyond PENDING_REACH_MAX_ATR the
+                # rec is dropped outright; closer-but-far zones get a
+                # distance-scaled TTL instead of a hopeless 4h window.
+                dist_atr = ((price - float(zone_high))
+                            / max(float(atr), 1e-12))
+                if dist_atr > settings.PENDING_REACH_MAX_ATR:
+                    log.info(
+                        f"[yellow]Rec dropped[/] {symbol} - entry zone "
+                        f"unreachable ({dist_atr:.1f} ATR above price > "
+                        f"{settings.PENDING_REACH_MAX_ATR:.1f} cap)")
+                    continue
+                if not momentum_ok:
+                    pending = risk_manager.add_pending_entry(
+                        rec, "price above entry zone - waiting for pullback",
+                        dist_atr=dist_atr)
+                    pending_symbols.add(symbol)
+                    if telegram_notifier.enabled:
+                        telegram_notifier.send_alert(
+                            f"أمر دخول معلق ⏳ {symbol}",
+                            f"منطقة الدخول: {pending['zone_low']:.4f} - "
+                            f"{pending['zone_high']:.4f}\n"
+                            f"الحالي: {price:.4f} (بانتظار ارتداد السعر للمنطقة)\n"
+                            f"وقف: {rec.get('stop_loss')} | TP1: {rec.get('take_profit')} "
+                            f"| TP2: {rec.get('take_profit_2')}\n"
+                            f"ينتهي خلال {settings.PENDING_TTL_HOURS * min(4.0, max(1.0, dist_atr)):.0f} ساعة"
+                        )
+                    continue
+                # momentum_ok -> fall through to the market open below
+                # (v5.17 bypass: strong momentum pays at most 1.0 ATR over
+                # the zone, and the reach gate above already capped it).
 
         result = risk_manager.open_position(rec)  # auto paper/live
         if result.get("status") == "opened":

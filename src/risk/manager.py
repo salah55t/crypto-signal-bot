@@ -881,7 +881,22 @@ class RiskManager:
             #    bottom-fishing position opened under a bearish 4h regime
             #    (price below the cloud at the low) no longer dies on the
             #    next cycle just because the regime is still bearish.
+            #    v5.19 PRODUCTION FORENSICS: that guard was dead code for
+            #    the only strategy that trades - build_bottom_rec carries
+            #    no ichimoku field, so entry_ichimoku_regime was always
+            #    None, and None != "bearish" made EVERY bearish reading a
+            #    "flip". All 16 closed trades (bottom_scanner_boost) died
+            #    with this exact reason 30-40 min after entry = the grace
+            #    expiry, winners included (INJ +1.63%, UNI +1.02% were
+            #    killed mid-profit). A bottom is a PRICE thesis, not a
+            #    trend thesis: price under the 4h cloud is its NATURAL
+            #    state, so the regime label can never be its kill switch.
+            #    Bottom trades now exit on: hard SL (1.2 ATR under entry,
+            #    below the swing low), opposite signal >= 55 (still armed
+            #    above), time stop, TP ladder - never on the cloud label.
             if regime == "bearish":
+                if pos.get("boosted_from_bottom"):
+                    return ("none", None)
                 if entry_regime != "bearish" and not in_grace:
                     return ("exit", "Ichimoku regime flipped bearish")
                 return ("none", None)
@@ -897,7 +912,11 @@ class RiskManager:
                     and tenkan < current_price):
                 return ("tighten", f"Tenkan cross-down defence ({tenkan:.4f})")
         else:
+            # v5.19: mirror immunity for (future) short bottoms - same
+            # price-thesis-not-trend-thesis semantics.
             if regime == "bullish":
+                if pos.get("boosted_from_bottom"):
+                    return ("none", None)
                 if entry_regime != "bullish" and not in_grace:
                     return ("exit", "Ichimoku regime flipped bullish")
                 return ("none", None)
@@ -1420,12 +1439,21 @@ class RiskManager:
     # v5: PENDING LIMIT ENTRIES — "buy the pocket, never chase"
     # ============================================
 
-    def add_pending_entry(self, rec: Dict, reason: str = "") -> Dict:
+    def add_pending_entry(self, rec: Dict, reason: str = "",
+                          dist_atr: float = 0.0) -> Dict:
         """Arm a pending LIMIT entry at the golden-pocket/entry zone.
 
         Instead of chasing a market buy when price has already left the
         entry zone, the setup is parked here and filled ONLY if price comes
         back into the zone within PENDING_TTL_HOURS.
+
+        v5.19: the TTL scales with how far the zone sits below the price
+        (dist_atr, in ATRs). Production showed a 4h TTL on zones 4.9-5.0
+        ATR away (AAVE/NVDABUSDT) - a 5-ATR pullback inside 4 hours is a
+        crash, not a fill, so the orders were guaranteed to expire while
+        the strategy looked broken. dist 1 ATR -> 1x TTL, 3 ATR -> 3x TTL,
+        capped at 4x. Unreachable zones (> PENDING_REACH_MAX_ATR) never
+        reach this method - cycle.py drops them.
         """
         symbol = rec["symbol"]
         # one pending per symbol
@@ -1440,6 +1468,8 @@ class RiskManager:
         entry = rec.get("entry_price") or rec.get("current_price") or 0
         zone_low = float(zone.get("low") or entry)
         zone_high = float(zone.get("high") or entry)
+        ttl_scale = min(4.0, max(1.0, float(dist_atr or 1.0)))
+        ttl_hours = settings.PENDING_TTL_HOURS * ttl_scale
         pending = {
             "symbol": symbol,
             "direction": rec.get("direction", "bullish"),
@@ -1448,17 +1478,17 @@ class RiskManager:
             "ref_price": rec.get("current_price"),
             "atr": float(rec.get("atr", 0) or 0),
             "created_at": now_utc().isoformat(),
-            "expires_at": (now_utc() + timedelta(
-                hours=settings.PENDING_TTL_HOURS)).isoformat(),
+            "expires_at": (now_utc() + timedelta(hours=ttl_hours)).isoformat(),
             "reason": reason,
             "rec": rec,
         }
         self.pending_entries.append(pending)
         save_json(self.pending_entries, PENDING_FILE)
+        dist_tag = f", dist {dist_atr:.1f} ATR" if dist_atr else ""
         log.info(
             f"[cyan]Pending LIMIT entry armed[/] {symbol} "
             f"zone [{zone_low:.4f} - {zone_high:.4f}] "
-            f"(ttl {settings.PENDING_TTL_HOURS:.0f}h) - {reason}"
+            f"(ttl {ttl_hours:.1f}h{dist_tag}) - {reason}"
         )
         return pending
 

@@ -310,11 +310,41 @@ def _stub_cycle_gates(monkeypatch):
 
 
 def test_far_above_zone_pends_even_for_a_plus(monkeypatch):
-    """4 ATR above the zone: even an A+ 99% setup must NOT chase."""
+    """2 ATR above the zone: even an A+ 99% setup must NOT chase
+    (v5.17 momentum cap; v5.19 passes the zone distance to the pending)."""
+    _stub_cycle_gates(monkeypatch)
+    pending_calls, opened_calls = [], []
+    armed_with = {}
+
+    def fake_arm(rec, reason="", dist_atr=0.0):
+        pending_calls.append(rec["symbol"])
+        armed_with["dist_atr"] = dist_atr
+        return {"zone_low": 100.0, "zone_high": 102.0}
+
+    def fake_open(rec):
+        opened_calls.append(rec["symbol"])
+        return {"status": "opened"}
+
+    monkeypatch.setattr("src.risk.manager.risk_manager.add_pending_entry",
+                        fake_arm, raising=False)
+    monkeypatch.setattr("src.risk.manager.risk_manager.open_position",
+                        fake_open, raising=False)
+    from src.core.cycle import open_new_positions
+    open_new_positions([_cycle_rec(price=106.0)])  # 2 ATR above zone_high
+    assert pending_calls == ["AAAUSDT"]
+    assert opened_calls == []
+    assert armed_with["dist_atr"] == pytest.approx(2.0)
+
+
+def test_unreachable_zone_dropped_even_for_a_plus(monkeypatch):
+    """v5.19 reach gate: 4 ATR above the zone is NOT an entry waiting to
+    happen - a 5-ATR pullback inside a 4h TTL never filled in production
+    (AAVE/NVDABUSDT 2026-09-29 pended at 4.9-5.0 ATR and expired). The rec
+    is dropped outright instead of parking a hopeless pending order."""
     _stub_cycle_gates(monkeypatch)
     pending_calls, opened_calls = [], []
 
-    def fake_arm(rec, reason=""):
+    def fake_arm(rec, reason="", dist_atr=0.0):
         pending_calls.append(rec["symbol"])
         return {"zone_low": 100.0, "zone_high": 102.0}
 
@@ -328,17 +358,18 @@ def test_far_above_zone_pends_even_for_a_plus(monkeypatch):
                         fake_open, raising=False)
     from src.core.cycle import open_new_positions
     open_new_positions([_cycle_rec(price=110.0)])  # 4 ATR above zone_high
-    assert pending_calls == ["AAAUSDT"]
+    assert pending_calls == []
     assert opened_calls == []
 
 
 def test_far_above_zone_pends_for_high_confidence(monkeypatch):
-    """admission_confidence 95 without a_plus: the OLD behavior opened here
-    (AVAX 90.9 chased +18%). Now it waits for the pullback."""
+    """admission_confidence 95 without a_plus, 2 ATR above the zone: the OLD
+    behavior opened here (AVAX 90.9 chased +18%). Now it waits for the
+    pullback (and the 4-ATR case is dropped by the v5.19 reach gate)."""
     _stub_cycle_gates(monkeypatch)
     pending_calls, opened_calls = [], []
 
-    def fake_arm(rec, reason=""):
+    def fake_arm(rec, reason="", dist_atr=0.0):
         pending_calls.append(rec["symbol"])
         return {"zone_low": 100.0, "zone_high": 102.0}
 
@@ -351,7 +382,7 @@ def test_far_above_zone_pends_for_high_confidence(monkeypatch):
     monkeypatch.setattr("src.risk.manager.risk_manager.open_position",
                         fake_open, raising=False)
     from src.core.cycle import open_new_positions
-    open_new_positions([_cycle_rec(price=110.0, conf=95.0, a_plus=False)])
+    open_new_positions([_cycle_rec(price=106.0, conf=95.0, a_plus=False)])
     assert pending_calls == ["AAAUSDT"]
     assert opened_calls == []
 
@@ -361,7 +392,7 @@ def test_near_zone_momentum_still_opens(monkeypatch):
     _stub_cycle_gates(monkeypatch)
     pending_calls, opened_calls = [], []
 
-    def fake_arm(rec, reason=""):
+    def fake_arm(rec, reason="", dist_atr=0.0):
         pending_calls.append(rec["symbol"])
         return {"zone_low": 100.0, "zone_high": 102.0}
 
