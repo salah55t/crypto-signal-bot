@@ -199,8 +199,10 @@ def test_market_short_flip_still_exits(tmp_path, monkeypatch):
 # B) TP1/TP2 bounce ladder
 # ======================================================================
 def test_scanner_tp_ladder():
-    """TP1 banks the bounce (1.2x ATR), TP2 keeps the runner (2.5x ATR),
-    RR stays computed on TP2 (2.5/1.2 = 2.083 > MIN_RR_RATIO)."""
+    """v5.20: TP1 = min(1.2x ATR, BOTTOM_TP1_CAP_PCT of price) - the bank
+    leg must be REACHABLE (production: 1.2x-ATR TP1 sat 2.9-5.5% away while
+    bounces died at MFE 0.11-2.86%, filled 1/6). TP2 keeps the runner
+    (2.5x ATR); RR stays computed on TP2 (2.5/1.2 = 2.083 > MIN_RR_RATIO)."""
     closes = []
     p = 1.50
     for i in range(58):          # steady dump ~1.5% per bar
@@ -211,7 +213,10 @@ def test_scanner_tp_ladder():
     assert not r.get("skip"), f"must pass gates, got: {r.get('reason')}"
     price = r["current_price"]
     atr = price * r["atr_pct"] / 100.0
-    assert r["take_profit"] == pytest.approx(price + 1.2 * atr)
+    # ~1.7% ATR puts 1.2x ATR (~2.0%) above the 1.5% cap -> capped
+    tp1_expected = min(1.2 * atr, price * settings.BOTTOM_TP1_CAP_PCT / 100.0)
+    assert r["take_profit"] == pytest.approx(price + tp1_expected)
+    assert tp1_expected == pytest.approx(price * settings.BOTTOM_TP1_CAP_PCT / 100.0)
     assert r["take_profit_2"] == pytest.approx(price + 2.5 * atr)
     assert r["take_profit_2"] > r["take_profit"]
     assert r["risk_reward_ratio"] == pytest.approx(2.5 / 1.2, rel=1e-3)

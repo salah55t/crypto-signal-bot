@@ -45,6 +45,11 @@ def make_manager(tmp_path, monkeypatch, positions=None, daily=None):
         def __getattr__(self, name):
             return lambda *a, **k: None
     monkeypatch.setattr(manager_module, "db", _NoDB())
+    # v5.20: the bottom-channel tide gate must not read the REAL
+    # data/market_tide.json (bearish cache on disk would reject every
+    # boosted open in the suite). Deterministic here; the v5.20 tests
+    # enable it explicitly with a monkeypatched _tide_snapshot.
+    monkeypatch.setattr(settings, "BOTTOM_BTC_TIDE_GATE", False)
     return RiskManager(capital=10000)
 
 
@@ -233,10 +238,13 @@ def test_chandelier_disabled_no_trailing_below_breakeven(tmp_path, monkeypatch):
     pos["atr"] = 5.0  # huge ATR -> chandelier below SL -> no update
     rm.open_positions = [pos]
     updates = rm.apply_trailing_logic({"TESTUSDT": 101.5}, {})
-    # profit 1.5% -> ladder wants BE (100); chandelier 101.5-12.5 < 98
-    assert pos["stop_loss"] == pytest.approx(100.0)
-    # ladder update happened (BE) but nothing above it
-    assert all(u["new_sl"] <= 100.0 for u in updates if u["new_sl"])
+    # v5.20: profit 1.5% -> ladder locks +0.30% (entry*1.003 = 100.30);
+    # chandelier 101.5-12.5 < 98 never competes
+    expected = 100.0 * (1 + settings.LADDER_LOCK1_LEVEL_PCT / 100.0)
+    assert pos["stop_loss"] == pytest.approx(expected)
+    # ladder update happened (lock1) but nothing above it
+    assert all(u["new_sl"] <= expected + 1e-9
+               for u in updates if u["new_sl"])
 
 
 def test_chandelier_never_above_current_price(tmp_path, monkeypatch):

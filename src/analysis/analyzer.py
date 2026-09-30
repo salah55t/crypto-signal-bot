@@ -51,7 +51,20 @@ def build_bottom_rec(c: Dict) -> Dict:
     from the strategy-scale MIN_HARMONY gate.
     """
     score = float(c.get("score", 0))
-    confidence = min(settings.BOTTOM_CONF_CAP, 40.0 + score / 2.0)
+    # v5.20: differentiate confidence. Production ledger showed EVERY
+    # bottom rec at exactly 72.0 (median score 75 -> 40+score/2 always
+    # pinned at BOTTOM_CONF_CAP): ranking, regime gates and continuation
+    # logic were all blind. Penalize the two measured killers before the
+    # cap: distance already travelled off the low (late chase) and high
+    # ATR (noise swamp, the ZAMA failure). Admission is still score-gated
+    # (BOTTOM_STRONG_SCORE), so this only re-ranks, never blocks.
+    dist_pct = float(c.get("distance_from_low_pct") or 0.0)
+    atr_pct = float(c.get("atr_pct") or 0.0)
+    raw_conf = 40.0 + score / 2.0
+    raw_conf -= max(0.0, dist_pct - 2.5) * 2.0   # late chase penalty
+    raw_conf -= max(0.0, atr_pct - 2.5) * 3.0    # noise penalty
+    confidence = min(settings.BOTTOM_CONF_CAP, raw_conf)
+    confidence = max(confidence, 0.0)
     n_layers = len(c.get("signals") or [])
     harmony = round(min(0.85, 0.35 + 0.10 * max(0, n_layers - 1)), 2)
     return {

@@ -14,6 +14,16 @@ ENV/
 .env.local
 *.env
 
+
+# v5.20: local test-run artifacts (never ship these)
+data/_tmp_test.db*
+data/comp_backtest.log
+data/comprehensive_trades.csv
+data/diagnose_v516*.json
+data/sl_sensitivity.log
+data/bottom_candidates.json
+data/market_tide.json
+
 # Data / Logs
 data/logs/*
 data/historical/*

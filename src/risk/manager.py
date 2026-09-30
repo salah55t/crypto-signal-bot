@@ -196,6 +196,48 @@ class RiskManager:
             return False
         return True
 
+    def _bottom_channel_ok(self, symbol: str) -> Tuple[bool, str]:
+        """v5.20: clustering + tape caps for the bottom-boost channel.
+
+        The 2026-09-29 burst put FIVE bottom longs into the market within
+        6 hours on a falling tape: BOTTOM_MAX_PER_CYCLE only counts entries
+        inside ONE cycle, so successive cycles stacked correlated risk.
+        Admission-time checks (paper and live alike):
+          1. max concurrent open bottom positions
+          2. minimum spacing since the newest bottom entry
+          3. no new bottom longs into a bearish 1h BTC regime (the whole
+             6-trade burst was counter-tape)
+        """
+        bottoms = [p for p in self.open_positions
+                   if p.get("boosted_from_bottom")]
+        cap = int(settings.BOTTOM_MAX_OPEN_CONCURRENT)
+        if len(bottoms) >= cap:
+            return (False,
+                    f"bottom concurrent cap ({len(bottoms)}/{cap} open)")
+        last_ts = None
+        for p in bottoms:
+            try:
+                t = datetime.fromisoformat(str(p.get("entry_time")))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if last_ts is None or t > last_ts:
+                    last_ts = t
+            except Exception:
+                continue
+        if last_ts is not None:
+            gap_min = (now_utc() - last_ts).total_seconds() / 60.0
+            if gap_min < settings.BOTTOM_ENTRY_SPACING_MIN:
+                return (False,
+                        f"bottom entry spacing ({gap_min:.0f}min < "
+                        f"{settings.BOTTOM_ENTRY_SPACING_MIN:.0f}min)")
+        if settings.BOTTOM_BTC_TIDE_GATE:
+            regime, _score = self._tide_snapshot()
+            if regime == "bearish":
+                return (False,
+                        "bottom tide gate (BTC 1h regime bearish) - "
+                        "no counter-tape bounce longs")
+        return (True, "")
+
     def position_size(self, entry_price: float, stop_loss: float) -> float:
         """
         Compute position size in base currency using fixed fractional risk.
@@ -325,6 +367,13 @@ class RiskManager:
         if not self.can_open_position(rec.get("symbol")):
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
 
+        # v5.20: bottom-channel clustering + tape caps (concurrent bottom
+        # positions, entry spacing, bearish-BTC tide gate).
+        if rec.get("boosted_from_bottom"):
+            _bok, _bwhy = self._bottom_channel_ok(rec.get("symbol", ""))
+            if not _bok:
+                return {"status": "rejected", "reasons": [_bwhy]}
+
         entry = rec["current_price"]
         sl = rec["stop_loss"]
         # Use fixed $10 trade amount (configurable via TRADE_AMOUNT_USD)
@@ -439,6 +488,12 @@ class RiskManager:
             return {"status": "rejected", "reasons": reasons}
         if not self.can_open_position():
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
+
+        # v5.20: bottom-channel clustering + tape caps (live path too)
+        if rec.get("boosted_from_bottom"):
+            _bok, _bwhy = self._bottom_channel_ok(rec.get("symbol", ""))
+            if not _bok:
+                return {"status": "rejected", "reasons": [_bwhy]}
 
         symbol = rec["symbol"]
         entry = rec["current_price"]
@@ -787,7 +842,12 @@ class RiskManager:
                                  (peak - entry) / entry * 100)
 
     def _check_time_stop(self, pos: Dict, pnl_pct: float) -> Optional[str]:
-        """v5: a trade that goes nowhere is dead capital."""
+        """v5: a trade that goes nowhere is dead capital.
+        v5.20: bottom-channel STAGNATION exit. The 72h stale-trade horizon
+        fits trend trades; a bounce that has not appeared within 6h with
+        pnl < 0.2% and MFE < 0.6% never worked (INTCB: -2.59% over 11.6h
+        with MFE 0.22%; ZAMA: -5.71% with MFE 0.11%). Close early, recycle
+        the slot, keep the loss small."""
         age_h = self._position_age_hours(pos)
         if age_h >= settings.ABSOLUTE_MAX_TRADE_HOURS:
             return (f"Max holding time reached "
@@ -796,6 +856,16 @@ class RiskManager:
                 and pnl_pct < settings.TIME_STOP_MIN_PNL_PCT):
             return (f"Time stop: stale trade ({age_h:.1f}h, "
                     f"{pnl_pct:+.2f}% < {settings.TIME_STOP_MIN_PNL_PCT:.2f}%)")
+        stag_h = float(getattr(settings, "BOTTOM_STAGNATION_HOURS", 0) or 0)
+        if (pos.get("boosted_from_bottom") and stag_h > 0
+                and age_h >= stag_h
+                and pnl_pct < settings.BOTTOM_STAGNATION_MAX_PNL_PCT
+                and float(pos.get("mfe_pct") or 0.0)
+                    < settings.BOTTOM_STAGNATION_MAX_MFE_PCT):
+            return (f"Bottom stagnation exit ({age_h:.1f}h, "
+                    f"pnl {pnl_pct:+.2f}%, MFE "
+                    f"{float(pos.get('mfe_pct') or 0.0):.2f}% - "
+                    f"no bounce appeared, recycling capital")
         return None
 
     @staticmethod
@@ -1170,6 +1240,14 @@ class RiskManager:
             "mfe_pct": float(row.get("mfe_pct") or 0),
             "mae_pct": float(row.get("mae_pct") or 0),
             "strategy": row.get("strategy") or "",
+            # v5.20: the ledger has no dedicated column for this flag, but
+            # bottom-boost trades are the only ones whose _primary_strategy
+            # is "bottom_scanner_boost". Restoring it matters: without the
+            # flag a restart (Render redeploys constantly) silently strips
+            # the v5.19 structural-exit immunity and disables the v5.20
+            # stagnation exit / clustering caps for surviving positions.
+            "boosted_from_bottom": (
+                (row.get("strategy") or "") == "bottom_scanner_boost"),
             "risk_updates": [],
             "restored_from_db": True,
         }
@@ -1297,19 +1375,26 @@ class RiskManager:
                 # --- Mechanism 1: ladder (compute TARGET SL for the profit
                 # level, then take max(target, current_sl) so we always jump
                 # straight to the highest earned level.
+                # v5.20: settings-driven and finer at the bottom rung. The
+                # old +1% -> flat break-even gave back the whole move (ZEC
+                # peaked +1.95%, exited -0.20% after fees). Locking a third
+                # of the move at +1% keeps noise exits profitable.
                 target_sl = None
-                if profit_pct >= 5.0:
+                if profit_pct >= settings.LADDER_TRAIL_PCT:
                     target_sl = current * 0.99   # trail 1% below price
                     reason = f"Trailing stop (profit +{profit_pct:.2f}%)"
-                elif profit_pct >= 3.0:
-                    target_sl = entry * 1.02
-                    reason = f"Lock +2% profit (current +{profit_pct:.2f}%)"
-                elif profit_pct >= 2.0:
-                    target_sl = entry * 1.01
-                    reason = f"Lock +1% profit (current +{profit_pct:.2f}%)"
-                elif profit_pct >= 1.0:
-                    target_sl = entry
-                    reason = f"Break-even (profit +{profit_pct:.2f}%)"
+                elif profit_pct >= settings.LADDER_LOCK3_PCT:
+                    target_sl = entry * (1 + settings.LADDER_LOCK3_LEVEL_PCT / 100.0)
+                    reason = (f"Lock +{settings.LADDER_LOCK3_LEVEL_PCT:.2f}% profit "
+                              f"(current +{profit_pct:.2f}%)")
+                elif profit_pct >= settings.LADDER_LOCK2_PCT:
+                    target_sl = entry * (1 + settings.LADDER_LOCK2_LEVEL_PCT / 100.0)
+                    reason = (f"Lock +{settings.LADDER_LOCK2_LEVEL_PCT:.2f}% profit "
+                              f"(current +{profit_pct:.2f}%)")
+                elif profit_pct >= settings.LADDER_LOCK1_PCT:
+                    target_sl = entry * (1 + settings.LADDER_LOCK1_LEVEL_PCT / 100.0)
+                    reason = (f"Lock +{settings.LADDER_LOCK1_LEVEL_PCT:.2f}% profit "
+                              f"(current +{profit_pct:.2f}%)")
 
                 if target_sl is not None and target_sl > current_sl:
                     new_sl = target_sl
@@ -1360,20 +1445,23 @@ class RiskManager:
                             reason += f" + Locked {locked_pct:.2f}% profit"
 
             elif pos["direction"] == "bearish":
-                # mirror ladder for bearish (chandelier mirrored)
+                # mirror ladder for bearish (chandelier mirrored, v5.20 rungs)
                 target_sl = None
-                if profit_pct >= 5.0:
+                if profit_pct >= settings.LADDER_TRAIL_PCT:
                     target_sl = current * 1.01
                     reason = f"Trailing stop (profit +{profit_pct:.2f}%)"
-                elif profit_pct >= 3.0:
-                    target_sl = entry * 0.98
-                    reason = f"Lock +2% profit (current +{profit_pct:.2f}%)"
-                elif profit_pct >= 2.0:
-                    target_sl = entry * 0.99
-                    reason = f"Lock +1% profit (current +{profit_pct:.2f}%)"
-                elif profit_pct >= 1.0:
-                    target_sl = entry
-                    reason = f"Break-even (profit +{profit_pct:.2f}%)"
+                elif profit_pct >= settings.LADDER_LOCK3_PCT:
+                    target_sl = entry * (1 - settings.LADDER_LOCK3_LEVEL_PCT / 100.0)
+                    reason = (f"Lock +{settings.LADDER_LOCK3_LEVEL_PCT:.2f}% profit "
+                              f"(current +{profit_pct:.2f}%)")
+                elif profit_pct >= settings.LADDER_LOCK2_PCT:
+                    target_sl = entry * (1 - settings.LADDER_LOCK2_LEVEL_PCT / 100.0)
+                    reason = (f"Lock +{settings.LADDER_LOCK2_LEVEL_PCT:.2f}% profit "
+                              f"(current +{profit_pct:.2f}%)")
+                elif profit_pct >= settings.LADDER_LOCK1_PCT:
+                    target_sl = entry * (1 - settings.LADDER_LOCK1_LEVEL_PCT / 100.0)
+                    reason = (f"Lock +{settings.LADDER_LOCK1_LEVEL_PCT:.2f}% profit "
+                              f"(current +{profit_pct:.2f}%)")
                 if target_sl is not None and (current_sl is None or target_sl < current_sl):
                     new_sl = target_sl
 
@@ -1579,13 +1667,11 @@ class RiskManager:
     # v5: MARKET TIDE (BTC) FILTER
     # ============================================
 
-    def market_tide_blocked(self) -> Tuple[bool, str]:
-        """Block NEW entries when the BTC regime is strongly bearish.
-        Cached to data/market_tide.json for MARKET_FILTER_CACHE_MIN minutes.
-        Open positions are ALWAYS still managed - this gate is entries-only.
-        """
-        if not settings.MARKET_FILTER_ENABLED:
-            return (False, "")
+    def _tide_snapshot(self) -> Tuple[Optional[str], float]:
+        """v5.20: BTC 1h regime + score from the shared market_tide cache
+        (data/market_tide.json), refreshed when stale. (None, 0.0) on any
+        failure. Used by market_tide_blocked AND the v5.20 bottom-channel
+        tide gate."""
         cache_file = Path("data/market_tide.json")
         cached = load_json(cache_file, default={})
         try:
@@ -1610,9 +1696,16 @@ class RiskManager:
             except Exception as e:
                 log.warning(f"Market tide fetch failed: {e}")
                 cached = cached or {"regime": None, "score": 0}
+        return (cached.get("regime"), float(cached.get("score") or 0))
 
-        regime = cached.get("regime")
-        score = float(cached.get("score") or 0)
+    def market_tide_blocked(self) -> Tuple[bool, str]:
+        """Block NEW entries when the BTC regime is strongly bearish.
+        Cached to data/market_tide.json for MARKET_FILTER_CACHE_MIN minutes.
+        Open positions are ALWAYS still managed - this gate is entries-only.
+        """
+        if not settings.MARKET_FILTER_ENABLED:
+            return (False, "")
+        regime, score = self._tide_snapshot()
         if regime == "bearish" and score <= -40:
             return (True,
                     f"Market tide bearish ({settings.MARKET_FILTER_SYMBOL} "

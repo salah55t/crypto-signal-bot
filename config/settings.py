@@ -387,6 +387,57 @@ class Settings:
     # the runner aims for the classic 2.5x-ATR target (TP2).
     BOTTOM_TP1_ATR_MULT: float = float(os.getenv("BOTTOM_TP1_ATR_MULT", "1.2"))
     BOTTOM_TP2_ATR_MULT: float = float(os.getenv("BOTTOM_TP2_ATR_MULT", "2.5"))
+    # v5.20 PRODUCTION FORENSICS (6 closed trades, all bottom_scanner_boost,
+    # PF 0.24, losses 4x wins): TP1 = 1.2x ATR on a 4h ATR of 2.4-4.6% sits
+    # 2.9-5.5% away while the observed bounces died at MFE 0.11-2.86%
+    # (median 1.6%) -> TP1 filled 1/6 trades, and only on the lowest-ATR
+    # coin. The cap makes the bank leg reachable: min(1.2x ATR, 1.5%).
+    BOTTOM_TP1_CAP_PCT: float = float(os.getenv("BOTTOM_TP1_CAP_PCT", "1.5"))
+    # v5.20: NO maximum ATR gate existed - ZAMAUSDT (4h ATR ~4.6%) took a
+    # 5.5% stop that alone produced 79% of the net loss (MFE 0.11% = the
+    # entry never worked). Bottoms are bounce trades: above ~3% 4h ATR the
+    # noise swamps the signal and the ladder distances become fantasy.
+    BOTTOM_MAX_ATR_PCT: float = float(os.getenv("BOTTOM_MAX_ATR_PCT", "3.0"))
+    # v5.20: entry-clustering caps. 2026-09-29 put 5 bottom entries into the
+    # market within 6 hours on a falling tape (per-cycle cap only counts
+    # entries INSIDE one cycle). Cap concurrent bottom positions and enforce
+    # a minimum spacing between consecutive bottom entries.
+    BOTTOM_MAX_OPEN_CONCURRENT: int = int(
+        os.getenv("BOTTOM_MAX_OPEN_CONCURRENT", "2"))
+    BOTTOM_ENTRY_SPACING_MIN: float = float(
+        os.getenv("BOTTOM_ENTRY_SPACING_MIN", "45"))
+    # v5.20: bottom longs stand against the tape by design, but not into a
+    # bearish 1h BTC regime (the 6-trade burst was 6/6 bullish bottoms into
+    # a falling market). Reuses the market_tide.json cache/fetch.
+    BOTTOM_BTC_TIDE_GATE: bool = os.getenv(
+        "BOTTOM_BTC_TIDE_GATE", "true").lower() == "true"
+    # v5.20: stagnation exit for bottom trades. MAX_TRADE_HOURS=72h is a
+    # trend-trade horizon; a bounce that has not appeared within 6h (pnl
+    # < 0.2% AND MFE < 0.6% - it never went anywhere) is dead capital:
+    # INTCB bled -2.59% over 11.6h with MFE 0.22%, ZAMA -5.71% with MFE
+    # 0.11%. Recycle the slot while the loss is still small.
+    BOTTOM_STAGNATION_HOURS: float = float(
+        os.getenv("BOTTOM_STAGNATION_HOURS", "6"))
+    BOTTOM_STAGNATION_MAX_PNL_PCT: float = float(
+        os.getenv("BOTTOM_STAGNATION_MAX_PNL_PCT", "0.20"))
+    BOTTOM_STAGNATION_MAX_MFE_PCT: float = float(
+        os.getenv("BOTTOM_STAGNATION_MAX_MFE_PCT", "0.60"))
+    # v5.20: finer profit ladder (settings-driven, mirrored for shorts).
+    # The old coarse ladder (+1% -> BE, +2% -> +1%) gave back 50-100% of
+    # every bounce: ZEC peaked +1.95% and exited -0.20% (BE), CAKE peaked
+    # +2.86% and exited +0.80%. Locking a third of the move at +1% turns
+    # the ZEC case from a fee-loss into a small win while keeping the
+    # higher rungs intact for real runners.
+    LADDER_LOCK1_PCT: float = float(os.getenv("LADDER_LOCK1_PCT", "1.0"))
+    LADDER_LOCK1_LEVEL_PCT: float = float(
+        os.getenv("LADDER_LOCK1_LEVEL_PCT", "0.30"))
+    LADDER_LOCK2_PCT: float = float(os.getenv("LADDER_LOCK2_PCT", "2.0"))
+    LADDER_LOCK2_LEVEL_PCT: float = float(
+        os.getenv("LADDER_LOCK2_LEVEL_PCT", "1.10"))
+    LADDER_LOCK3_PCT: float = float(os.getenv("LADDER_LOCK3_PCT", "3.0"))
+    LADDER_LOCK3_LEVEL_PCT: float = float(
+        os.getenv("LADDER_LOCK3_LEVEL_PCT", "2.0"))
+    LADDER_TRAIL_PCT: float = float(os.getenv("LADDER_TRAIL_PCT", "5.0"))
 
     # --- Market Map: leader/follower correlation classification (v5.2) ---
     # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).

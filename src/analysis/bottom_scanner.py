@@ -72,6 +72,18 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
             "reason": (f"TP inside fees ({tp_pct_gate:.2f}% < "
                        f"{settings.BOTTOM_MIN_TP_PCT:.2f}%)")
         }
+    # v5.20: MAX-ATR gate (mirror of the min floor). ZAMAUSDT (4h ATR
+    # ~4.6%) sailed through the min-only gate, took a 5.5% stop that was
+    # 79% of the net production loss, and its bounce died at MFE 0.11%.
+    # Above ~3% 4h ATR the bounce medians (1.6%) can never reach the
+    # ladder legs - the trade is noise, not signal.
+    if pre_atr_pct > settings.BOTTOM_MAX_ATR_PCT:
+        return {
+            "symbol": symbol, "skip": True,
+            "reason": (f"Volatility too high for a bounce trade "
+                       f"(ATR {pre_atr_pct:.2f}% > "
+                       f"{settings.BOTTOM_MAX_ATR_PCT:.2f}% ceiling)")
+        }
     # Statistical flatness (v5.16 thresholds, scanner-local copy): a coin
     # can pass a small ATR floor yet never leave its rolling range.
     try:
@@ -160,7 +172,15 @@ def score_bottom_candidate(symbol: str, df: pd.DataFrame) -> Dict:
     # ~2R to the runner to clear the MIN_RR_RATIO gate).
     atr_val = pre_atr  # v5.18: reuse the pre-gate ATR (identical value)
     sl_distance = atr_val * 1.2  # tighter SL for bottom fishing
-    tp1_distance = atr_val * max(0.5, settings.BOTTOM_TP1_ATR_MULT)
+    # v5.20: TP1 = min(1.2x ATR, BOTTOM_TP1_CAP_PCT of price). Production:
+    # 1.2x-ATR TP1 sat 2.9-5.5% away on the actual trade set while bounces
+    # died at MFE 0.11-2.86% -> filled 1/6 (only the ATR-0.93% coin). The
+    # cap makes the bank leg reachable; TP2 stays the 2.5x-ATR runner so
+    # the RR gate (computed on TP2) is untouched.
+    tp1_distance = min(
+        atr_val * max(0.5, settings.BOTTOM_TP1_ATR_MULT),
+        current_price * settings.BOTTOM_TP1_CAP_PCT / 100.0,
+    )
     tp2_distance = max(tp1_distance, atr_val * settings.BOTTOM_TP2_ATR_MULT)
     stop_loss = current_price - sl_distance
     take_profit = current_price + tp1_distance
