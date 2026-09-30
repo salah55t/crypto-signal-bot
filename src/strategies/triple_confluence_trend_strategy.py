@@ -42,7 +42,8 @@ class TripleConfluenceTrendStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         if len(df) < MIN_BARS:
             return self._neutral(
                 f"Insufficient data for EMA200 ({len(df)}/{MIN_BARS} bars)")
@@ -125,12 +126,21 @@ class TripleConfluenceTrendStrategy(BaseStrategy):
 
         # --- LIQUIDITY class ---
         # 4) volume above its 20-bar average
+        #    v5.21 graded: professionals demand volume at the TRIGGER bar,
+        #    but a trend-riding entry on 0.8-1.0x volume is a partial
+        #    setup, not a hard veto (the old hard gate made the whole
+        #    strategy mute on quiet sessions).
+        low_volume = False
         if vol_ratio >= 1.3:
             score += 20
             reasons.append(f"Strong volume ({vol_ratio:.2f}x avg20)")
         elif vol_ratio >= 1.0:
             score += 15
             reasons.append(f"Volume above average ({vol_ratio:.2f}x)")
+        elif vol_ratio >= 0.8:
+            score += 8
+            low_volume = True
+            reasons.append(f"Thin volume ({vol_ratio:.2f}x) - partial only")
         else:
             return self._neutral(
                 f"No liquidity confirmation ({vol_ratio:.2f}x avg20)", details)
@@ -140,9 +150,24 @@ class TripleConfluenceTrendStrategy(BaseStrategy):
             score += 10
             reasons.append("OBV rising (accumulation)")
 
+        # === v5.21 MTF: macro-trend confluence (the 200-EMA rule, daily) ===
+        # The 1h/4h stack being bullish inside a daily downtrend is the
+        # classic failed-relief-rally trap. Aligned macro = bonus.
+        from src.analysis.mtf import htf_against, htf_agrees, ltf_agrees
+        if htf_against(mtf_ctx, "bullish"):
+            low_volume = True  # cap at partial - never a full signal
+            reasons.append("MTF: daily downtrend against the stack")
+        else:
+            if htf_agrees(mtf_ctx, "bullish"):
+                score += 6
+                reasons.append("MTF: daily uptrend agrees")
+            if ltf_agrees(mtf_ctx, "bullish"):
+                score += 3
+                reasons.append("MTF: 1h momentum agrees")
+
         score = max(-100, min(100, score))
 
-        if score >= 60:
+        if score >= 60 and not low_volume:
             return self._bull(score, reasons, details)
         elif score >= 40:
             return self._bull(score * 0.5,

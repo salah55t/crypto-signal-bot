@@ -35,10 +35,16 @@ class BaseStrategy(ABC):
     @abstractmethod
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         """
         Run the strategy on the given OHLCV DataFrame.
         Returns a Signal object.
+
+        v5.21: `mtf_ctx` is the shared multi-timeframe context dict
+        (src/analysis/mtf.mtf_context) - the professional higher-TF trend +
+        1h tactical momentum. When None/unavailable every strategy must
+        behave exactly as before (fail-open contract).
         """
         pass
 

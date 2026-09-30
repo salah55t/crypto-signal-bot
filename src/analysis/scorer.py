@@ -201,10 +201,29 @@ class SignalScorer:
         if df is None or len(df) < 60:
             return {"symbol": symbol, "skip": True, "reason": "Insufficient data"}
 
+        # === v5.21: one multi-timeframe snapshot per symbol ===
+        # Daily macro trend + 1h tactical momentum, shared by every
+        # strategy (the professional's first filter). The daily fetch is
+        # gated on the live WS feed so unit tests stay hermetic; bans are
+        # handled inside mtf._daily (fail-open -> strategies unchanged).
+        mtf_ctx = None
+        try:
+            from src.core.ws_feed import ws_feed as _ws
+            if getattr(settings, "MTF_ENABLED", True) and _ws._started:
+                from src.analysis.mtf import mtf_context
+                n_tf = len(settings.TIMEFRAMES or ["4h"])
+                primary_tf = (settings.TIMEFRAMES[n_tf // 2]
+                              if n_tf > 1 else settings.TIMEFRAMES[0])
+                mtf_ctx = mtf_context(symbol, multi_tf_data,
+                                      primary_tf=primary_tf)
+        except Exception:
+            mtf_ctx = None
+
         signals: List[Signal] = []
         for strat in self.strategies:
             try:
-                sig = strat.analyze(df, symbol, multi_tf_data, order_book)
+                sig = strat.analyze(df, symbol, multi_tf_data, order_book,
+                                    mtf_ctx=mtf_ctx)
                 signals.append(sig)
             except Exception as e:
                 log.warning(f"Strategy {strat.name} failed for {symbol}: {e}")
@@ -218,6 +237,28 @@ class SignalScorer:
 
         verdict = self._compute_confidence(signals, self.strategies)
         direction = verdict["direction"]
+
+        # === v5.21: MTF alignment confidence bonus ===
+        # Professionals pay a premium for confluence that includes the
+        # macro tide. Applied only when >= 2 strategies vote the final
+        # direction AND the higher-timeframe trend agrees - a single loud
+        # strategy still cannot buy its way past MIN_CONFIDENCE.
+        try:
+            if mtf_ctx and float(getattr(settings, "MTF_CONF_BONUS", 0)) > 0:
+                from src.analysis.mtf import htf_agrees
+                if htf_agrees(mtf_ctx, direction):
+                    voters = [s for s in signals
+                              if s.direction == direction
+                              and abs(float(s.score)) >= self.VOTE_THRESHOLD]
+                    if len(voters) >= 2:
+                        verdict["confidence"] = min(
+                            100.0,
+                            verdict["confidence"]
+                            + float(settings.MTF_CONF_BONUS))
+                        verdict["mtf_bonus"] = float(
+                            settings.MTF_CONF_BONUS)
+        except Exception:
+            pass
 
         current_price = float(df["close"].iloc[-1])
 
@@ -401,6 +442,8 @@ class SignalScorer:
             },
             "ichimoku": icho or {},
             "elliott": elliott or {},
+            # v5.21: multi-timeframe context snapshot (dashboard/governance)
+            "mtf": mtf_ctx or {},
             "decision": {
                 "vetoed": decision["vetoed"],
                 "veto_reason": decision["veto_reason"],

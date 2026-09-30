@@ -25,6 +25,7 @@ Automatic SELL/EXIT conditions (user spec, emitted as bearish signals):
 """
 import pandas as pd
 from typing import Dict, Optional
+from config.settings import settings
 from src.indicators.technical import (
     bollinger_bands, stochastic, rsi, sma, atr,
 )
@@ -40,7 +41,8 @@ class BBMeanReversionStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         if len(df) < 60:
             return self._neutral("Insufficient data")
 
@@ -121,7 +123,16 @@ class BBMeanReversionStrategy(BaseStrategy):
                 details)
 
         # 3) fresh positive %K x %D cross inside the oversold zone
+        #    v5.21 alt path: research consensus - the most profitable mean
+        #    reversion setups combine an RSI extreme + BB touch + a
+        #    confirmation candle even WITHOUT a stochastic cross. The old
+        #    code hard-vetoed those, muting the strategy for whole days.
         fresh_cross = (k_prev <= d_prev) and (k_now > d_now)
+        rsi_extreme_bounce = (
+            rsi_now < 28
+            and float(close.iloc[-1]) > float(df["open"].iloc[-1])
+            and band_break
+        )
         if fresh_cross and k_now < 30:
             score += 30
             reasons.append(
@@ -133,6 +144,11 @@ class BBMeanReversionStrategy(BaseStrategy):
         elif k_now > d_now and k_now < 25:
             score += 10
             reasons.append("Stoch turning up in oversold zone")
+        elif rsi_extreme_bounce:
+            score += 12
+            reasons.append(
+                f"RSI extreme bounce ({rsi_now:.1f}) + bullish close "
+                f"+ broken band (no stoch cross yet)")
         else:
             return self._neutral("No Stoch bullish crossover yet", details)
 
@@ -147,6 +163,42 @@ class BBMeanReversionStrategy(BaseStrategy):
         elif vol_ratio >= 0.8:
             score += 5
             reasons.append(f"Volume present ({vol_ratio:.2f}x)")
+
+        # === v5.21 regime guard: mean reversion collapses in regime breaks ===
+        # Fading the lower band inside a violent downtrend is knife-catching:
+        # ADX above the ceiling AND a daily downtrend against the trade =
+        # partial-only. An aligned daily uptrend (buying a dip to the band
+        # in a macro uptrend) is the professional bread-and-butter setup.
+        from src.analysis.mtf import htf_against, htf_agrees
+        adx_val = None
+        try:
+            from src.indicators.technical import adx as _adx
+            adx_val = float(_adx(high, low, close, 14)["adx"].iloc[-1])
+        except Exception:
+            adx_val = None
+        violent_tape = (
+            adx_val is not None
+            and adx_val > float(getattr(settings, "BB_REGIME_ADX_MAX", 32.0))
+        )
+        against_macro = htf_against(mtf_ctx, "bullish")
+        if against_macro:
+            reasons.append("MTF: daily downtrend against the fade")
+        elif htf_agrees(mtf_ctx, "bullish"):
+            score += 6
+            reasons.append("MTF: daily uptrend - buying a dip, not a knife")
+        if (violent_tape and against_macro):
+            if score >= 40:
+                return self._bull(
+                    score * 0.5,
+                    [f"Regime-guard partial (ADX {adx_val:.0f}): {r}"
+                     for r in reasons],
+                    details)
+            return self._neutral(
+                f"Violent tape (ADX={adx_val:.0f}) - no fade", details)
+        if against_macro and score >= 40:
+            return self._bull(
+                score * 0.5,
+                [f"Counter-HTF partial: {r}" for r in reasons], details)
 
         score = max(-100, min(100, score))
 

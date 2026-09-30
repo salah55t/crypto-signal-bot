@@ -43,7 +43,8 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         if len(df) < 60:
             return self._neutral("Insufficient data")
 
@@ -235,6 +236,28 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
                 reasons.append(f"Price near upper BB (Percent B={bb_pct:.2f})")
 
         # Clamp
+        score = max(-100, min(100, score))
+
+        # === v5.21 MTF: sweep quality vs the macro tide ===
+        # A bullish sweep AT macro support (daily uptrend) is the
+        # institutional entry; a bullish sweep inside a daily downtrend is
+        # one bounce in a falling series - partial at most.
+        from src.analysis.mtf import htf_against, htf_agrees
+        sig_dir = sweep_dir
+        if htf_against(mtf_ctx, sweep_dir):
+            if score >= 50:
+                scaled = score * 0.5
+                partial = [f"Counter-HTF sweep partial: {r}"
+                           for r in reasons]
+                return self._bull(scaled, partial, details) \
+                    if sig_dir == "bullish" \
+                    else self._bear(scaled, partial, details)
+            return self._neutral(
+                f"Sweep against the daily trend - low quality ({score})",
+                details)
+        if htf_agrees(mtf_ctx, sweep_dir):
+            score += 8
+            reasons.append("MTF: sweep at the macro-trend side")
         score = max(-100, min(100, score))
 
         # Need at least 50 points (3/5 checklist + 1 bonus)

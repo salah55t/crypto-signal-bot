@@ -35,7 +35,8 @@ class TrendPullbackStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         if len(df) < 60:
             return self._neutral("Insufficient data")
 
@@ -173,6 +174,25 @@ class TrendPullbackStrategy(BaseStrategy):
         if macd_hist > 0 and macd_hist > macd_hist_prev:
             score += 8
             reasons.append("MACD histogram rising")
+
+        # === v5.21 MTF: the professional's first filter ===
+        # "Only trade pullbacks in the direction of the higher timeframe."
+        # A pullback in a macro downtrend is a falling knife with better
+        # marketing - full signals there are capped at partial.
+        from src.analysis.mtf import htf_against, htf_agrees, ltf_agrees
+        if htf_against(mtf_ctx, "bullish"):
+            reasons.append("MTF: daily/HTF downtrend against the pullback")
+            if bullish_candle and has_pullback and score >= 50:
+                return self._bull(score * 0.5,
+                                  [f"Counter-HTF partial: {r}" for r in reasons],
+                                  details)
+        else:
+            if htf_agrees(mtf_ctx, "bullish"):
+                score += 8
+                reasons.append("MTF: higher timeframe uptrend agrees")
+            if ltf_agrees(mtf_ctx, "bullish"):
+                score += 4
+                reasons.append("MTF: 1h momentum agrees")
 
         # Clamp
         score = max(-100, min(100, score))

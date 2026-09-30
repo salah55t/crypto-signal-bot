@@ -23,6 +23,7 @@ CONFLUENCE CHECKLIST (need 4/5 to trigger):
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional
+from config.settings import settings
 from src.indicators.technical import bollinger_bands, atr, adx, rsi, ema
 from src.strategies.base import BaseStrategy, Signal
 
@@ -34,7 +35,8 @@ class VolatilityBreakoutStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         if len(df) < 60:
             return self._neutral("Insufficient data")
 
@@ -168,14 +170,65 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             score += 5
             reasons.append(f"RSI bearish zone ({rsi_val:.1f})")
 
+        # === v5.21 professional breakout-quality filters ===
+        # 1) FAKEOUT FILTER (research consensus: "a breakout without
+        #    volume is often a fake-out"): a full signal needs real
+        #    volume on the breakout candle; below the ratio it is a
+        #    partial-only setup.
+        # 2) CHASE GUARD: a candle closing > CHASE_ATR beyond the band is
+        #    a vertical move - professionals wait for the retest.
+        # 3) MTF: breakouts against the daily tide are capped partial;
+        #    aligned breakouts get the bonus.
+        low_conf = False
+        breakout_dir = "bullish" if bullish_breakout else \
+            "bearish" if bearish_breakout else None
+        if breakout_dir:
+            min_vol = float(getattr(settings, "VOL_BREAKOUT_MIN_VOL_RATIO",
+                                    1.2))
+            chase_atr = float(getattr(settings, "VOL_BREAKOUT_CHASE_ATR",
+                                      2.5))
+            if vol_ratio < min_vol:
+                low_conf = True
+                reasons.append(
+                    f"Breakout without volume ({vol_ratio:.2f}x < "
+                    f"{min_vol:.1f}x) - fakeout risk, partial only")
+            if atr_val > 0:
+                if bullish_breakout and \
+                        (current_price - bb_upper) > chase_atr * atr_val:
+                    score -= 8
+                    low_conf = True
+                    reasons.append(
+                        f"Late chase ({(current_price - bb_upper) / atr_val:.1f} "
+                        f"ATR beyond band) - wait for the retest")
+                elif bearish_breakout and \
+                        (bb_lower - current_price) > chase_atr * atr_val:
+                    score -= 8
+                    low_conf = True
+                    reasons.append(
+                        f"Late chase ({(bb_lower - current_price) / atr_val:.1f} "
+                        f"ATR beyond band) - wait for the retest")
+            from src.analysis.mtf import htf_against, htf_agrees
+            if htf_against(mtf_ctx, breakout_dir):
+                low_conf = True
+                reasons.append("MTF: daily trend against the breakout")
+            elif htf_agrees(mtf_ctx, breakout_dir):
+                score += 6
+                reasons.append("MTF: daily trend agrees")
+
         # Clamp
         score = max(-100, min(100, score))
 
         # Need at least 50 points (4/5 checklist + bonuses)
-        if bullish_breakout and score >= 50:
+        if bullish_breakout and score >= 50 and not low_conf:
             return self._bull(score, reasons, details)
-        elif bearish_breakout and score >= 50:
+        elif bearish_breakout and score >= 50 and not low_conf:
             return self._bear(score, reasons, details)
+        elif low_conf and breakout_dir and score >= 40:
+            scaled = score * 0.5
+            partial = [f"Quality-filter partial: {r}" for r in reasons]
+            return self._bull(scaled, partial, details) \
+                if breakout_dir == "bullish" \
+                else self._bear(scaled, partial, details)
         elif score >= 30 and (is_squeeze or was_squeezed_recently):
             # Squeeze building — small bullish bias
             if current_price > bb_middle:

@@ -42,7 +42,8 @@ class MACDBreakoutStrategy(BaseStrategy):
 
     def analyze(self, df: pd.DataFrame, symbol: str,
                 multi_tf_data: Optional[Dict[str, pd.DataFrame]] = None,
-                order_book: Optional[Dict] = None) -> Signal:
+                order_book: Optional[Dict] = None,
+                mtf_ctx: Optional[Dict] = None) -> Signal:
         if len(df) < MIN_BARS:
             return self._neutral(
                 f"Insufficient data for MACD/EMA50 ({len(df)}/{MIN_BARS})")
@@ -160,12 +161,20 @@ class MACDBreakoutStrategy(BaseStrategy):
             return self._neutral("Histogram still negative", details)
 
         # --- LIQUIDITY class ---
+        # v5.21 graded: a momentum burst on 0.8-1.0x volume is still a
+        # valid setup for a PARTIAL vote - the old hard veto muted the
+        # strategy for entire sessions.
+        thin_volume = False
         if vol_ratio >= 1.3:
             score += 15
             reasons.append(f"Breakout volume ({vol_ratio:.2f}x avg20)")
         elif vol_ratio >= 1.0:
             score += 10
             reasons.append(f"Volume confirmed ({vol_ratio:.2f}x)")
+        elif vol_ratio >= 0.8:
+            score += 5
+            thin_volume = True
+            reasons.append(f"Thin volume ({vol_ratio:.2f}x) - partial only")
         else:
             return self._neutral(
                 f"No volume confirmation ({vol_ratio:.2f}x avg20)", details)
@@ -179,9 +188,24 @@ class MACDBreakoutStrategy(BaseStrategy):
             score += 6
             reasons.append(f"Trend strength (ADX={adx_val:.1f})")
 
+        # === v5.21 MTF: macro tide confluence ===
+        # A momentum ignition against the daily trend is a scalp at best -
+        # cap it at partial. Aligned macro momentum runs further.
+        from src.analysis.mtf import htf_against, htf_agrees, ltf_agrees
+        if htf_against(mtf_ctx, "bullish"):
+            thin_volume = True  # cap at partial
+            reasons.append("MTF: daily downtrend against the ignition")
+        else:
+            if htf_agrees(mtf_ctx, "bullish"):
+                score += 6
+                reasons.append("MTF: daily uptrend agrees")
+            if ltf_agrees(mtf_ctx, "bullish"):
+                score += 3
+                reasons.append("MTF: 1h momentum agrees")
+
         score = max(-100, min(100, score))
 
-        if score >= 60:
+        if score >= 60 and not thin_volume:
             return self._bull(score, reasons, details)
         elif score >= 40:
             return self._bull(score * 0.5,

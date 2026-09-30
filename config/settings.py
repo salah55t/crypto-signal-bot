@@ -507,6 +507,30 @@ class Settings:
     # Weekend window: Fri 22:00 UTC -> Mon 00:00 UTC (thin liquidity)
     WEEKEND_FILTER: bool = os.getenv("WEEKEND_FILTER", "true").lower() == "true"
 
+    # --- v5.21 Professional multi-timeframe (MTF) context ---
+    # "Daily for context, 1h for timing, trade only with the macro tide."
+    # When unavailable (bans, no data) every strategy fails OPEN - the
+    # pre-v5.21 behaviour is bit-identical.
+    MTF_ENABLED: bool = os.getenv("MTF_ENABLED", "true").lower() == "true"
+    # 1d macro frame fetch (weight 2, TTL-cached; skipped during REST bans)
+    MTF_FETCH_DAILY: bool = os.getenv("MTF_FETCH_DAILY", "true").lower() == "true"
+    MTF_DAILY_TTL_MIN: int = int(os.getenv("MTF_DAILY_TTL_MIN", "60"))
+    MTF_DAILY_FAIL_TTL_S: int = int(os.getenv("MTF_DAILY_FAIL_TTL_S", "300"))
+    # 1h tactical frame (WS-cached, free) - timing confirmation
+    MTF_LTF_ENABLED: bool = os.getenv("MTF_LTF_ENABLED", "true").lower() == "true"
+    # Confidence bonus when >= 2 strategies agree AND the daily tide agrees
+    MTF_CONF_BONUS: float = float(os.getenv("MTF_CONF_BONUS", "3.0"))
+    # v5.21 volatility-breakout quality gates (professional fakeout filter):
+    # a breakout candle needs real volume; a vertical candle is a chase.
+    VOL_BREAKOUT_MIN_VOL_RATIO: float = float(
+        os.getenv("VOL_BREAKOUT_MIN_VOL_RATIO", "1.2"))
+    VOL_BREAKOUT_CHASE_ATR: float = float(
+        os.getenv("VOL_BREAKOUT_CHASE_ATR", "2.5"))
+    # v5.21 BB mean-reversion regime guard: fade band extremes only when
+    # the tape is not a violent trend (mean reversion collapses in regime
+    # breaks - the single most-cited professional caveat).
+    BB_REGIME_ADX_MAX: float = float(os.getenv("BB_REGIME_ADX_MAX", "32.0"))
+
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "data/logs/bot.log")
