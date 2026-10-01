@@ -709,6 +709,21 @@ class Settings:
         "Cryptocurrency Spot Trading Signal Bot for Binance with Multi-Strategy Analysis"
     )
 
+    # --- v5.26: dashboard control-plane auth + CORS lockdown ---
+    # Token REQUIRED by POST /api/run-analysis, /api/scan-bottoms and
+    # /api/reset-history (sent as 'Authorization: Bearer <token>' or
+    # 'X-Auth-Token: <token>'). The dashboard is public on Render: without
+    # this, ANY visitor could wipe the trade history or burn the REST
+    # weight budget. UNSET = these endpoints are DISABLED (fails closed).
+    # Generate one with:  python -c "import secrets; print(secrets.token_urlsafe(32))"
+    DASHBOARD_API_TOKEN: str = os.getenv("DASHBOARD_API_TOKEN", "").strip()
+    # Comma-separated allow-list of cross-origin origins granted credentialed
+    # CORS (e.g. "https://mybot.example,https://dashboard.example").
+    # Empty = no credentialed cross-origin access (the bundled dashboard is
+    # same-origin and needs none); external GET clients keep working via a
+    # credentialless wildcard.
+    CORS_ALLOWED_ORIGINS: str = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+
     # --- Capital (for paper trading) ---
     INITIAL_CAPITAL: float = float(os.getenv("INITIAL_CAPITAL", "10000"))
 

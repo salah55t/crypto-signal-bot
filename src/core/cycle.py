@@ -228,16 +228,24 @@ def manage_open_positions(market_signals: Dict[str, Dict] = None,
 
     # 2) Structure-aware exits (Ichimoku flip / opposite signal) - main cycle
     if structural and settings.STRUCTURAL_EXITS_ENABLED:
-        for i in range(len(risk_manager.open_positions) - 1, -1, -1):
-            pos = risk_manager.open_positions[i]
+        # v5.26: iterate a SNAPSHOT and close/update by trade_uid. The 1-min
+        # watcher closes positions concurrently; index-based access into the
+        # live list here could close the WRONG position after a watcher pop
+        # shifted the indices between the read and the close.
+        snapshot = [{**p} for p in risk_manager.open_positions]
+        for pos in reversed(snapshot):
             sig = market_signals.get(pos["symbol"])
             price = current_prices.get(pos["symbol"])
             if not sig or not price:
                 continue
             action, reason = risk_manager.evaluate_structural_exit(pos, sig, price)
             if action == "exit":
-                closed = risk_manager.close_position(i, price,
-                                                     f"Structural exit: {reason}")
+                closed = risk_manager.close_position_by_uid(
+                    pos.get("trade_uid"), price,
+                    f"Structural exit: {reason}")
+                if closed.get("status") == "error":
+                    # already closed by the watcher between snapshot and now
+                    continue
                 _save_closed_trades([closed])
                 _notify_closed([closed])
                 log.info(
@@ -252,8 +260,9 @@ def manage_open_positions(market_signals: Dict[str, Dict] = None,
                 except Exception:
                     level = None
                 if level:
-                    res = risk_manager.update_position_risk(
-                        i, price, level, None, f"Structural: {reason}")
+                    res = risk_manager.update_position_risk_by_uid(
+                        pos.get("trade_uid"), price, level, None,
+                        f"Structural: {reason}")
                     if res.get("status") == "updated":
                         log.info(f"[blue]Structural tighten[/] {pos['symbol']} - {reason}")
 

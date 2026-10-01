@@ -16,7 +16,9 @@ v5 "Veteran Trader" management:
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime, timezone, timedelta
+import functools
 import secrets
+import threading
 from config.settings import settings
 from src.db.database import db
 from src.utils.logger import log
@@ -30,6 +32,31 @@ PENDING_FILE = Path("data/pending_entries.json")
 def _new_trade_uid() -> str:
     """v5.11: unique, human-readable trade identity (ledger primary key)."""
     return f"TRD-{now_utc().strftime('%Y%m%d')}-{secrets.token_hex(2).upper()}"
+
+
+def _locked(fn):
+    """v5.26: serialize RiskManager state access across threads.
+
+    open_positions/daily_stats/pending_entries were mutated from FOUR
+    concurrent contexts (analysis cron, 1-min watcher, manual POST
+    triggers, /api/reset-history) with no synchronization: index-based
+    close_position could pop the WRONG position after another thread
+    shifted the list, and concurrent save_json calls could lose updates.
+    Every public method that reads-then-writes trading state now runs
+    under the instance RLock (re-entrant: check_open_positions ->
+    close_position and open_* -> can_open_position nest safely).
+
+    Known trade-off (accepted): open_* may fetch the BTC tide snapshot
+    (cached 30 min, REST fetch only on stale cache) while holding the
+    lock - the 1-min watcher may wait one fetch. Correctness wins over
+    the race it eliminates. Lock order is always _lock -> transport
+    (rate limiter/DB); no reverse path exists.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 def _primary_strategy(rec: Dict) -> str:
@@ -48,6 +75,9 @@ class RiskManager:
     """Enforces risk rules across the trading bot."""
 
     def __init__(self, capital: float = None):
+        # v5.26: the lock must exist before ANY state is touched (the DB
+        # restore below and every decorated method depend on it).
+        self._lock = threading.RLock()
         self.capital = capital or settings.INITIAL_CAPITAL
         self.open_positions: List[Dict] = load_json(POSITIONS_FILE, default=[])
         self.daily_stats: Dict = load_json(DAILY_STATS_FILE, default={})
@@ -129,6 +159,7 @@ class RiskManager:
             return False
         return True
 
+    @_locked
     def sync_daily_opened(self, db_count: int):
         """v4.1: sync today's opened count from DB (survives process restarts)."""
         self._ensure_today_stats()
@@ -163,6 +194,7 @@ class RiskManager:
         """v4.1: public check for per-symbol re-entry cooldown (after a loss)."""
         return bool(symbol) and self._in_reentry_cooldown(symbol)
 
+    @_locked
     def can_open_position(self, symbol: str = None) -> bool:
         """Check if we can open a new position (risk rules).
         v4.1 adds: daily trade cap, loss-streak pause, per-symbol re-entry cooldown.
@@ -318,18 +350,52 @@ class RiskManager:
                         "no counter-tape scalp longs")
         return (True, "")
 
+    def position_size_notional(self, entry_price: float,
+                                stop_loss: float) -> float:
+        """
+        v5.26: USD notional for a trade whose STOP hit loses exactly
+        RISK_PER_TRADE% of capital (real fixed-fractional risk):
+
+            notional = (capital * RISK_PER_TRADE%) / (|entry - SL| / entry)
+
+        - regime size multiplier still applies (v5.13 contract)
+        - hard-capped at 20% of capital (unchanged)
+        - unusable entry/SL -> conservative fallback of 5x the risk amount
+          (assumes a 2% stop distance), STILL capped - never the old
+          unlinked 10x heuristic that ignored the stop entirely.
+        """
+        risk_amount = self.capital * (settings.RISK_PER_TRADE / 100.0)
+        notional = 0.0
+        try:
+            entry = float(entry_price or 0)
+            sl = float(stop_loss or 0)
+        except (TypeError, ValueError):
+            entry = sl = 0.0
+        if entry > 0 and sl > 0:
+            sl_pct = abs(entry - sl) / entry
+            if sl_pct > 0:
+                notional = risk_amount / sl_pct
+        if notional <= 0:
+            notional = risk_amount * 5.0
+        notional *= self._regime_size_multiplier()
+        return min(notional, self.capital * 0.20)
+
     def position_size(self, entry_price: float, stop_loss: float) -> float:
         """
         Compute position size in base currency using fixed fractional risk.
         Risk = settings.RISK_PER_TRADE% of capital.
         Returns position size in units of base asset.
+        v5.26: derived from position_size_notional (single source of truth
+        shared with the live sizing path, including the 20% capital cap).
         """
-        risk_per_unit = abs(entry_price - stop_loss)
-        if risk_per_unit <= 0:
-            log.warning("Invalid risk_per_unit (entry == stop_loss)")
+        try:
+            entry = float(entry_price or 0)
+        except (TypeError, ValueError):
             return 0.0
-        risk_amount = self.capital * (settings.RISK_PER_TRADE / 100)
-        return risk_amount / risk_per_unit
+        if entry <= 0:
+            log.warning("Invalid entry_price for position_size")
+            return 0.0
+        return self.position_size_notional(entry_price, stop_loss) / entry
 
     @staticmethod
     def _regime_gates() -> tuple:
@@ -436,6 +502,7 @@ class RiskManager:
             reasons.append("Dead market (ATR% below floor)")
         return (len(reasons) == 0, reasons)
 
+    @_locked
     def open_paper_position(self, rec: Dict) -> Dict:
         """Open a paper-trading position based on a recommendation.
         Uses TRADE_AMOUNT_USD ($10 default) for position sizing.
@@ -557,6 +624,7 @@ class RiskManager:
         )
         return {"status": "opened", "position": position}
 
+    @_locked
     def open_live_position(self, rec: Dict) -> Dict:
         """
         Open a REAL position on Binance Spot.
@@ -584,7 +652,11 @@ class RiskManager:
         valid, reasons = self.validate_recommendation(rec)
         if not valid:
             return {"status": "rejected", "reasons": reasons}
-        if not self.can_open_position():
+        # v5.26 bugfix: the symbol was NOT passed here (the paper path passes
+        # it) so the per-symbol re-entry cooldown after a losing close was
+        # silently bypassed on the LIVE path - a just-stopped-out symbol was
+        # immediately re-buyable with real money.
+        if not self.can_open_position(rec.get("symbol")):
             return {"status": "rejected", "reasons": ["Risk limits reached"]}
 
         # v5.20: bottom-channel clustering + tape caps (live path too)
@@ -608,13 +680,14 @@ class RiskManager:
         sl = rec["stop_loss"]
         tp = rec["take_profit"]
 
-        # Position sizing: compute USD amount to risk
-        risk_amount = self.capital * (settings.RISK_PER_TRADE / 100)
-        # USD notional to spend: 2x risk amount (gives reasonable position size)
-        # Adjust so position size matches risk_per_trade model
-        # v5.13: regime size multiplier applies to LIVE notional too
-        notional_usd = min(risk_amount * 10 * self._regime_size_multiplier(),
-                           self.capital * 0.20)  # cap at 20% of capital
+        # Position sizing (v5.26): notional is DERIVED from the actual SL
+        # distance so hitting the stop loses exactly RISK_PER_TRADE% of
+        # capital (regime multiplier still applies, capped at 20%). The old
+        # "risk_amount * 10" heuristic ignored the stop: a 0.5%-SL trade
+        # risked ~5x the intended 1% while a 10%-SL trade risked ~0.5x -
+        # real per-trade loss was 0.5-2%+ of capital depending on stop
+        # width, not the nominal RISK_PER_TRADE. See position_size_notional.
+        notional_usd = round(self.position_size_notional(entry, sl), 2)
         if notional_usd < 10:
             return {"status": "rejected", "reasons": [f"Notional ${notional_usd:.2f} below Binance minimum"]}
 
@@ -729,6 +802,7 @@ class RiskManager:
             return self.open_live_position(rec)
         return self.open_paper_position(rec)
 
+    @_locked
     def close_position(self, idx: int, exit_price: float, reason: str = "",
                        fraction: float = 1.0) -> Dict:
         """Close an open position at the given exit price.
@@ -738,6 +812,11 @@ class RiskManager:
         - the position stays open with reduced notional/size
         - partial closes do NOT touch the win/loss streak counters (only
           full closes do) - they only add realized P&L
+
+        v5.26: idx is only meaningful while the lock is held (it always is
+        now - this method and every caller of it are @_locked). External
+        callers that hold a position identity across an await/I-O gap must
+        use close_position_by_uid instead of caching an index.
         """
         if idx >= len(self.open_positions):
             return {"status": "error", "reason": "Invalid index"}
@@ -1141,6 +1220,7 @@ class RiskManager:
                 return ("tighten", f"Tenkan cross-up defence ({tenkan:.4f})")
         return ("none", None)
 
+    @_locked
     def check_open_positions(self, prices: Dict[str, float]) -> List[Dict]:
         """Check open positions: SL / TP1-partial / TP2 / time stop.
 
@@ -1255,6 +1335,7 @@ class RiskManager:
     # DYNAMIC SL/TP UPDATE (Trailing Stop + Break-Even)
     # ============================================
 
+    @_locked
     def update_position_risk(self, idx: int, current_price: float,
                               new_sl: float = None, new_tp: float = None,
                               reason: str = "") -> Dict:
@@ -1312,9 +1393,68 @@ class RiskManager:
             return {"status": "updated", "position": pos, "update": update_record}
         return {"status": "no_change"}
 
+    @_locked
     def has_open_position(self, symbol: str) -> bool:
         """Check if a position is already open for the given symbol."""
         return any(p.get("symbol") == symbol for p in self.open_positions)
+
+    @_locked
+    def index_of_uid(self, trade_uid: str) -> int:
+        """v5.26: fresh index of an open position by its ledger uid (-1 if
+        gone). ALWAYS re-resolve right before an index-based mutation when
+        the position identity was captured across any I/O or scheduling gap
+        - the watcher may have popped the list in between."""
+        if not trade_uid:
+            return -1
+        for i, p in enumerate(self.open_positions):
+            if p.get("trade_uid") == trade_uid:
+                return i
+        return -1
+
+    @_locked
+    def close_position_by_uid(self, trade_uid: str, exit_price: float,
+                              reason: str = "", fraction: float = 1.0) -> Dict:
+        """v5.26: uid-addressed close (the safe public entry point for
+        callers outside the lock scope, e.g. the structural-exit loop in
+        cycle.py). Resolves the index FRESH under the lock, so a concurrent
+        watcher close can never make a stale index close the WRONG
+        position; returns status=error when the position is already gone."""
+        idx = self.index_of_uid(trade_uid)
+        if idx < 0:
+            return {"status": "error",
+                    "reason": f"Position {trade_uid} not found (already closed?)"}
+        return self.close_position(idx, exit_price, reason, fraction=fraction)
+
+    @_locked
+    def update_position_risk_by_uid(self, trade_uid: str,
+                                     current_price: float, new_sl: float = None,
+                                     new_tp: float = None,
+                                     reason: str = "") -> Dict:
+        """v5.26: uid-addressed SL/TP update (same contract as
+        close_position_by_uid)."""
+        idx = self.index_of_uid(trade_uid)
+        if idx < 0:
+            return {"status": "error", "reason": "Position not found"}
+        return self.update_position_risk(idx, current_price, new_sl, new_tp,
+                                         reason)
+
+    @_locked
+    def clear_all_state(self):
+        """v5.26: locked wipe of the in-memory trading state (used by
+        /api/reset-history). The old direct `risk_manager.open_positions = []`
+        assignment from a request thread raced every other context AND left
+        daily_stats/_reentry_block/loss-streak intact in memory, so the next
+        save_json silently resurrected the pre-reset stats from RAM.
+        Mirrors exactly what the endpoint deletes from disk (positions,
+        daily stats, loss state); pending entries are kept (they are future
+        orders, not history - unchanged endpoint behavior)."""
+        self.open_positions = []
+        self._reentry_block = {}
+        self.daily_stats = {}
+        self._loss_streak = 0
+        self._loss_pause_until = None
+        log.warning("[red]RiskManager in-memory state cleared[/] "
+                    "(positions + daily stats + loss state)")
 
     # ============================================
     # v5.11: PERSISTENT TRADE LEDGER (source of truth = DB)
@@ -1480,6 +1620,7 @@ class RiskManager:
         if changed:
             save_json(self.open_positions, POSITIONS_FILE)
 
+    @_locked
     def apply_trailing_logic(self, current_prices: Dict[str, float],
                               market_signals: Dict[str, Dict] = None) -> List[Dict]:
         """
@@ -1682,6 +1823,7 @@ class RiskManager:
     # v5: PENDING LIMIT ENTRIES — "buy the pocket, never chase"
     # ============================================
 
+    @_locked
     def add_pending_entry(self, rec: Dict, reason: str = "",
                           dist_atr: float = 0.0) -> Dict:
         """Arm a pending LIMIT entry at the golden-pocket/entry zone.
@@ -1735,6 +1877,7 @@ class RiskManager:
         )
         return pending
 
+    @_locked
     def check_pending_fills(self, prices: Dict[str, float]) -> List[Dict]:
         """Fill / cancel / expire pending entries (called by the 1-min watcher).
 
@@ -1807,6 +1950,7 @@ class RiskManager:
             save_json(self.pending_entries, PENDING_FILE)
         return filled
 
+    @_locked
     def cancel_pending(self, symbol: str) -> bool:
         """Manually cancel a pending entry (also used after a fill opens)."""
         before = len(self.pending_entries)
@@ -1867,6 +2011,7 @@ class RiskManager:
                     f"score {score:.0f}) - new entries paused")
         return (False, "")
 
+    @_locked
     def get_positions_with_pnl(self, current_prices: Dict[str, float]) -> List[Dict]:
         """Return open positions with real-time P&L info (fees included)."""
         positions_with_pnl = []

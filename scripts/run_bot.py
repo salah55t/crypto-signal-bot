@@ -7,6 +7,7 @@ both paths behave identically). This process runs:
   - a 1-minute real-time position watcher (SL/TP/partial/pending fills)
 """
 import sys
+import signal
 from pathlib import Path
 
 # Ensure project root on path
@@ -18,6 +19,27 @@ from src.core.scheduler import scheduler
 from src.core.cycle import run_analysis_cycle, run_position_watch, run_scalp_scan
 from src.risk.manager import risk_manager
 from src.utils.logger import log
+
+
+def _graceful_shutdown(signum, frame):
+    """v5.26: SIGTERM/SIGINT -> stop jobs + WS feed before exit.
+
+    The web process gets this for free (uvicorn translates SIGTERM into the
+    FastAPI shutdown event, which now really stops the scheduler and the WS
+    feed); the standalone runner previously had NO handler, so a systemd /
+    docker stop killed a cycle mid-write.
+    """
+    log.warning(f"[yellow]Signal {signum} received - shutting down gracefully[/]")
+    try:
+        scheduler.scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    try:
+        from src.core.ws_feed import ws_feed
+        ws_feed.stop()
+    except Exception:
+        pass
+    raise SystemExit(0)
 
 
 def main():
@@ -73,6 +95,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # v5.26: graceful shutdown handlers (SIGTERM = Render/docker stop)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
     try:
         main()
     except KeyboardInterrupt:
