@@ -216,21 +216,45 @@ async def get_positions():
     # zeroed every price and the dashboard showed no P&L. get_batch_prices
     # handles both key shapes.
     symbols = list({p["symbol"] for p in positions})
+    # v5.23: pin position symbols into the WS feed universe. Bottom/momentum
+    # channel positions are NOT in the analyzer universe, so without pinning
+    # their @miniTicker streams are never subscribed -> dashboard P&L frozen
+    # at 0 AND the 1-min SL/TP monitor blind for exactly those positions
+    # (production: SPCXBUSDT/CRCLBUSDT 2026-10-01).
     try:
-        # v5.10: priority lane - position P&L must not be starved by the
-        # bulk analysis burst inside the shared rate budget.
-        current_prices = data_fetcher.get_batch_prices(symbols, priority=True)
-    except Exception as e:
-        # v5.10: during a shared-IP pressure cooldown serve last-known
-        # prices (<= 15 min) so the dashboard keeps showing P&L instead
-        # of the old double-failure (2w batch + 80w full-market abort).
-        current_prices = data_fetcher.get_last_known_prices(symbols, max_age_s=900)
-        if current_prices:
-            log.warning(
-                f"Position prices: live fetch failed ({e}) - "
-                f"serving {len(current_prices)} last-known price(s)")
+        from src.core.ws_feed import ws_feed
+        ws_feed.set_pinned(symbols)
+    except Exception:
+        pass
+
+    def _fetch_prices():
+        try:
+            # v5.10: priority lane - position P&L must not be starved by the
+            # bulk analysis burst inside the shared rate budget.
+            return data_fetcher.get_batch_prices(symbols, priority=True), None
+        except Exception as e:
+            # v5.10: during a shared-IP pressure cooldown serve last-known
+            # prices (<= 15 min) so the dashboard keeps showing P&L instead
+            # of the old double-failure (2w batch + 80w full-market abort).
+            known = data_fetcher.get_last_known_prices(symbols, max_age_s=900)
+            return known, e
+
+    # v5.23: the fetch may block on the rate limiter - run it OFF the event
+    # loop so dashboard polls never stall /api/health and the WS broadcasts.
+    current_prices, fetch_err = await asyncio.to_thread(_fetch_prices)
+    # v5.23: combine with last-known for any symbol the live fetch could not
+    # serve (cooldown skip leaves WS-uncovered gaps as misses).
+    gaps = [s for s in symbols if s not in current_prices]
+    if gaps:
+        known = data_fetcher.get_last_known_prices(gaps, max_age_s=900)
+        if known:
+            current_prices.update(known)
+    if not current_prices:
+        if fetch_err is not None:
+            log.error(f"Failed to fetch prices for positions: {fetch_err}")
         else:
-            log.error(f"Failed to fetch prices for positions: {e}")
+            log.warning("Position prices unavailable: WS has no data for "
+                        f"{symbols} and no last-known prices exist yet")
     return risk_manager.get_positions_with_pnl(current_prices)
 
 

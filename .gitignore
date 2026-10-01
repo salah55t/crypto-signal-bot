@@ -38,6 +38,9 @@ data/open_positions.json
 data/rate_state.json
 data/rate_state.tmp
 data/symbols_cache.json
+# v5.23 last-known price snapshot (runtime state, always stale by definition)
+data/last_prices.json
+data/last_prices.tmp
 # v5.18 runtime state (regime policy / Fear&Greed / leader maps) - a stale
 # committed policy would poison fresh deploys and local test runs alike
 data/regime_state.json

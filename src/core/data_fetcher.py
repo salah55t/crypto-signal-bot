@@ -3,12 +3,17 @@
 v5: order book snapshots are cached with a TTL (weight 5 per fetch) and
 24h tickers use the batched price endpoint when only prices are needed.
 """
+import json
+import os
 import time
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
 from config.settings import settings
 from src.core.binance_client import binance_client
+from src.core.rate_limiter import rate_limiter, RateLimitError
 from src.utils.logger import log
 from src.utils.helpers import retry_on_failure
 
@@ -181,6 +186,13 @@ class DataFetcher:
             return {}
         try:
             return binance_client.get_tickers_batch(symbols, priority=priority)
+        except RateLimitError:
+            # v5.23: budget exhaustion dooms the weight-4 full-market list
+            # TOO (it costs MORE than the 2w batch it "falls back" to).
+            # Production 2026-10-01: every dashboard poll logged the same
+            # failure twice (2w + 4w). Re-raise once; the caller's
+            # last-known fallback takes over immediately.
+            raise
         except Exception as e:
             log.warning(
                 f"Batch ticker fetch failed ({e}) - "
@@ -193,6 +205,57 @@ class DataFetcher:
     # fallback cannot run - e.g. shared-IP pressure cooldown) ----
     _LAST_PRICES: Dict[str, tuple] = {}  # symbol -> (time.time(), price)
 
+    # v5.23: disk-backed last-known prices. Render redeploys wipe the
+    # in-memory table; the cooldown restored from rate_state.json then
+    # blocks every REST price fetch for minutes - open positions opened by
+    # the bottom/momentum channels (SPCXBUSDT/CRCLBUSDT 2026-10-01) went
+    # price-blind on the dashboard AND in the 1-min SL/TP monitor. The file
+    # is written throttled and read lazily on the first memory miss.
+    _LAST_PRICES_FILE = Path("data/last_prices.json")
+    _LAST_PRICES_LAST_SAVE = 0.0
+    _LAST_PRICES_DISK_LOADED = False
+
+    @staticmethod
+    def _save_last_prices_disk() -> None:
+        """v5.23: throttled (30s) atomic write of last-known prices."""
+        now = time.time()
+        if now - DataFetcher._LAST_PRICES_LAST_SAVE < 30.0:
+            return
+        DataFetcher._LAST_PRICES_LAST_SAVE = now
+        try:
+            path = DataFetcher._LAST_PRICES_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                sym: {"price": price, "ts": ts}
+                for sym, (ts, price) in DataFetcher._LAST_PRICES.items()
+            }
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)
+        except Exception as e:  # persistence is best-effort, never fatal
+            log.debug(f"Last-prices disk save failed: {e}")
+
+    @staticmethod
+    def _load_last_prices_disk() -> None:
+        """v5.23: one-time lazy load; memory entries win (fresher)."""
+        DataFetcher._LAST_PRICES_DISK_LOADED = True
+        try:
+            with open(DataFetcher._LAST_PRICES_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            for sym, row in (payload or {}).items():
+                try:
+                    ts = float(row.get("ts", 0.0))
+                    price = float(row.get("price", 0.0))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if price > 0 and ts > 0:
+                    DataFetcher._LAST_PRICES.setdefault(sym, (ts, price))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.debug(f"Last-prices disk load failed: {e}")
+
     @staticmethod
     def get_batch_prices(symbols: List[str],
                          priority: bool = False) -> Dict[str, float]:
@@ -204,6 +267,12 @@ class DataFetcher:
         429/418 ban, so position watch / dashboard P&L / pending fills stay
         fully live while REST is banned - the old path fell back to stale
         last-known prices instead.
+
+        v5.23: during ANY active cooldown the REST gap-fill is SKIPPED
+        entirely (acquire could only block up to 90s to refuse) - the
+        caller combines the partial result with last-known prices. This
+        kills the "budget exhausted (2w)" + "(4w)" double failure the
+        dashboard produced on every poll during a ban.
         """
         if not symbols:
             return {}
@@ -221,6 +290,10 @@ class DataFetcher:
             missing = list(dict.fromkeys(symbols))
         # 2) REST only for the gaps (weight 2-4 per batched request)
         if missing:
+            if rate_limiter.cooldown_remaining() > 0.0:
+                # v5.23: a ban dooms every REST call - return what WS served
+                # and let the caller's last-known fallback fill the gaps.
+                return out
             for sym, t in DataFetcher.get_batch_tickers(
                     missing, priority=priority).items():
                 try:
@@ -230,12 +303,23 @@ class DataFetcher:
                 if price > 0:
                     out[sym] = price
                     DataFetcher._LAST_PRICES[sym] = (time.time(), price)
+        # v5.23: persist fresh prices so a REDEPLOY during a ban can still
+        # serve position P&L from disk on its very first polls.
+        if out:
+            DataFetcher._save_last_prices_disk()
         return out
 
     @staticmethod
     def get_last_known_prices(symbols: List[str],
                               max_age_s: float = 900.0) -> Dict[str, float]:
-        """v5.10: last successfully fetched prices, filtered by freshness."""
+        """v5.10: last successfully fetched prices, filtered by freshness.
+
+        v5.23: the first call in a process lazily loads the disk snapshot
+        (data/last_prices.json) - a fresh Render process that boots inside
+        a restored cooldown can still price open positions immediately.
+        """
+        if not DataFetcher._LAST_PRICES_DISK_LOADED:
+            DataFetcher._load_last_prices_disk()
         now = time.time()
         out = {}
         for sym in set(symbols):

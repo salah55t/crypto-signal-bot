@@ -288,6 +288,15 @@ def run_position_watch():
         symbols = list({
             p["symbol"] for p in risk_manager.open_positions
         } | {p["symbol"] for p in risk_manager.pending_entries})
+        # v5.23: pin positions + pendings into the WS feed universe so their
+        # @miniTicker streams are ALWAYS subscribed - SL/TP checks and
+        # pending-fill detection must never go price-blind for symbols the
+        # analyzer universe doesn't cover (bottom/momentum channel entries).
+        try:
+            from src.core.ws_feed import ws_feed
+            ws_feed.set_pinned(symbols)
+        except Exception:
+            pass
         # v5.10: priority lane first; if even that fails (shared-IP cooldown),
         # very-fresh last-known prices (<= 120s) keep SL/TP checking alive
         # instead of going blind for the whole cooldown window.

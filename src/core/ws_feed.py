@@ -86,6 +86,15 @@ class WSKlineFeed:
         self._ws = None
         self._thread: Optional[threading.Thread] = None
         self._universe: list = []       # desired symbols (UPPERCASE)
+        # v5.23: pinned symbols (open positions + pending entries). These are
+        # ALWAYS unioned into the subscribed universe regardless of analyzer
+        # universe churn - production 2026-10-01: SPCXBUSDT/CRCLBUSDT opened
+        # by the bottom channel were NOT in the analyzer universe, so their
+        # miniTicker streams were never subscribed -> zero live prices for
+        # open positions (dashboard P&L frozen at 0 AND the 1-min SL/TP
+        # monitor blind) while every dashboard poll burned REST weight that
+        # a shared-IP cooldown then blocked anyway.
+        self._pinned: set = set()
         self._connected = False
         self._connected_since = 0.0
         self._last_disconnect_gap = 0.0
@@ -121,12 +130,38 @@ class WSKlineFeed:
         reconnect gap cannot swallow a closed 1h/4h bar, existing series
         stay valid, and NEW symbols are paced-seeded by _seed_missing().
         """
-        wanted = sorted({s.upper().strip() for s in symbols if s})
+        wanted = {s.upper().strip() for s in symbols if s}
         with self._lock:
-            changed = wanted != self._universe
-            self._universe = wanted
+            # v5.23: pinned symbols (open positions / pendings) survive
+            # every analyzer universe refresh.
+            merged = sorted(wanted | self._pinned)
+            changed = merged != self._universe
+            self._universe = merged
         if changed and self._started:
-            log.info(f"[cyan]WS feed[/] universe changed ({len(wanted)} symbols) - reconnecting")
+            log.info(f"[cyan]WS feed[/] universe changed ({len(merged)} symbols) - reconnecting")
+            self._restart()
+
+    def set_pinned(self, symbols) -> None:
+        """v5.23: replace the pinned-symbol set (open positions + pendings).
+
+        Called by the 1-min position watcher and the /api/positions endpoint
+        with the CURRENT position symbols - replacing (not accumulating)
+        means closed positions unpin themselves naturally and the set can
+        never leak. Adding a pinned symbol triggers one reconnect so its
+        miniTicker stream starts immediately; identical calls are no-ops.
+        """
+        wanted = {s.upper().strip() for s in (symbols or []) if s}
+        with self._lock:
+            if wanted == self._pinned:
+                return
+            self._pinned = wanted
+            merged = sorted(set(self._universe) | wanted)
+            changed = merged != self._universe
+            self._universe = merged
+        if changed and self._started:
+            log.info(
+                f"[cyan]WS feed[/] pinned symbols updated ({len(wanted)} "
+                f"position/pending symbols) - reconnecting")
             self._restart()
 
     def start(self) -> None:

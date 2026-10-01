@@ -96,8 +96,12 @@ def test_zero_reserve_keeps_old_behaviour():
 # ============================================
 
 def test_fallback_uses_weight4_price_list_never_24hr(monkeypatch):
+    # v5.23: a RateLimitError now RE-RAISES (the heavier weight-4 list is
+    # guaranteed to fail too - see test_v523_price_blind). The weight-4
+    # fallback remains reachable for non-budget failures, which this test
+    # exercises: fallback must use /ticker/price (4w), NEVER /ticker/24hr.
     def boom(*a, **k):
-        raise RateLimitError("Rate budget exhausted (2w needed)")
+        raise ConnectionError("transient transport failure")
     monkeypatch.setattr(binance_client, "get_tickers_batch", boom)
 
     def must_not_call(*a, **k):
