@@ -105,6 +105,69 @@ def build_bottom_rec(c: Dict) -> Dict:
     }
 
 
+def build_double_ind_rec(c: Dict) -> Dict:
+    """v5.22: convert a momentum-scanner candidate (double_indicator) into a
+    recommendation dict.
+
+    The entry conditions are already binary (the strategy's 100% checklist),
+    so the candidate score IS the confidence: base DOUBLE_IND_CONF_BASE(76)
+    + quality bonuses - penalties, capped at DOUBLE_IND_CONF_CAP(80) - which
+    clears the regime-adjusted MIN_CONFIDENCE gate when the burst is clean
+    and fails it when the volume/body quality is suspect (intended).
+
+    boosted_from_momentum=True exempts the rec from the strategy-scale
+    MIN_HARMONY gate (same contract as boosted_from_bottom) and activates
+    the channel caps in risk manager (_momentum_channel_ok).
+    """
+    score = float(c.get("score", 0))
+    confidence = max(0.0, min(score, settings.DOUBLE_IND_CONF_CAP))
+    n_layers = len(c.get("signals") or [])
+    harmony = round(min(0.85, 0.35 + 0.10 * max(0, n_layers - 1)), 2)
+    price = float(c["current_price"])
+    tp2 = float(c.get("take_profit_2") or c.get("take_profit"))
+    return {
+        "symbol": c["symbol"],
+        "direction": "bullish",  # LONG-ONLY: the channel has no sell branch
+        "weighted_score": score,
+        "confidence": confidence,
+        "admission_confidence": confidence,
+        "current_price": price,
+        # Expected move = the runner target (TP2); its % floor (1.0%) keeps
+        # this above MIN_EXPECTED_RISE by construction.
+        "expected_rise_pct": max(
+            settings.MIN_EXPECTED_RISE,
+            abs(tp2 - price) / max(price, 1e-12) * 100.0),
+        "stop_loss": c["stop_loss"],
+        "take_profit": c["take_profit"],
+        "take_profit_2": tp2,
+        "risk_reward_ratio": float(c.get("risk_reward_ratio", 0.0)),
+        "atr": float(c.get("atr") or 0.0),
+        "atr_pct": float(c.get("atr_pct") or 0.0),
+        "harmony": harmony,
+        # Momentum entries buy strength at market - no limit zone to chase.
+        "entry_type": "market",
+        "signals": [{
+            "strategy": "double_indicator",
+            "direction": "bullish",
+            "score": score,
+            "confidence": confidence / 100.0,
+            "reasons": c.get("signals", []),
+            "details": {
+                "timeframe": c.get("timeframe"),
+                "pct_b_last": c.get("pct_b_last"),
+                "pct_b_avg": c.get("pct_b_avg"),
+                "volume_ratio": c.get("volume_ratio"),
+                "green_run": c.get("green_run"),
+                "st_line": c.get("st_line"),
+            },
+        }],
+        "timeframe": c.get("timeframe",
+                           settings.DOUBLE_IND_TIMEFRAME),
+        "analyzed_at": c.get("analyzed_at"),
+        "boosted_from_momentum": True,
+    }
+
+
 class MarketAnalyzer:
     """Top-level orchestrator: fetch -> analyze -> score -> filter."""
 
@@ -523,6 +586,75 @@ class MarketAnalyzer:
             pass
         except Exception as e:
             log.error(f"Bottom scanner boost failed: {e}")
+
+        # === v5.22 DOUBLE-INDICATOR MOMENTUM BOOST (the user's strategy) ===
+        # The documented BB(11,3)+SuperTrend(2,2) long-only setup, executed
+        # on 1m candles for the most liquid head of the universe. Same boost
+        # contract as the bottom channel: own admission (the strategy's 100%
+        # checklist + RR), session gate, per-cycle cap, then re-rank so the
+        # recs compete for the top MAX_RECOMMENDATIONS slots.
+        momentum_boosted = 0
+        try:
+            if not settings.DOUBLE_IND_ENABLED:
+                log.info("[cyan]Double-indicator channel disabled[/] "
+                         "(DOUBLE_IND_ENABLED=false)")
+                raise StopIteration  # skip the whole block cleanly
+            from src.analysis.momentum_scanner import momentum_scanner
+            mom_candidates = momentum_scanner.scan(
+                max_candidates=max(settings.DOUBLE_IND_MAX_PER_CYCLE * 3, 5))
+            # Admission: the scanner only returns signals that passed the
+            # 100% checklist; here we still require a coherent RR.
+            strong_mom = [
+                c for c in mom_candidates
+                if c.get("risk_reward_ratio", 0) >= settings.MIN_RR_RATIO
+            ]
+            if strong_mom:
+                log.info(
+                    f"[green]{len(strong_mom)} double-indicator candidate(s)[/]"
+                    f" (BB {settings.DOUBLE_IND_BB_PERIOD}/"
+                    f"{settings.DOUBLE_IND_BB_DEV:g} + ST "
+                    f"{settings.DOUBLE_IND_ST_PERIOD}/"
+                    f"{settings.DOUBLE_IND_ST_MULT:g})")
+            existing_symbols = {r.get("symbol") for r in filtered}
+            for c in strong_mom:
+                if momentum_boosted >= settings.DOUBLE_IND_MAX_PER_CYCLE:
+                    break
+                if c["symbol"] in existing_symbols:
+                    continue
+                # v5.18 pattern: the session clock gates this channel too
+                # (chop window / Saturday momentum block apply verbatim).
+                try:
+                    from src.analysis.session_clock import entry_gate, \
+                        session_info
+                    _blocked, _why = entry_gate(
+                        session_info(), "double_indicator", False)
+                    if _blocked:
+                        log.info(
+                            f"[yellow]Momentum boost blocked[/] "
+                            f"{c['symbol']}: {_why}")
+                        continue
+                except Exception:
+                    pass
+                rec = build_double_ind_rec(c)
+                filtered.append(rec)
+                existing_symbols.add(c["symbol"])
+                momentum_boosted += 1
+            if momentum_boosted:
+                log.info(
+                    f"[green]{momentum_boosted} double-indicator rec(s) "
+                    f"boosted into recommendations[/]")
+                filtered.sort(
+                    key=lambda r: (
+                        r.get("confidence", 0)
+                        + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0
+                        + 4.0 * min(r.get("harmony", 0.0), 1.0)
+                    ),
+                    reverse=True,
+                )
+        except StopIteration:
+            pass
+        except Exception as e:
+            log.error(f"Momentum scanner boost failed: {e}")
 
         # Limit
         # v5.13: Regime Router - re-rank the merged candidate list by how

@@ -94,7 +94,8 @@ def _blocked_hours() -> set:
         return {11, 12, 13, 14}
 
 
-BREAKOUT_STRATS = {"volatility_breakout", "macd_breakout"}
+BREAKOUT_STRATS = {"volatility_breakout", "macd_breakout",
+                   "double_indicator"}  # v5.22: 1m momentum channel
 REVERSAL_STRATS = {"liquidity_sweep_reversal", "bb_mean_reversion"}
 
 

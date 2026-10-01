@@ -439,6 +439,88 @@ class Settings:
         os.getenv("LADDER_LOCK3_LEVEL_PCT", "2.0"))
     LADDER_TRAIL_PCT: float = float(os.getenv("LADDER_TRAIL_PCT", "5.0"))
 
+    # --- v5.22 Double-Indicator momentum channel (user strategy, spot-only,
+    #     long-only) ---
+    # The user's documented strategy, applied to the letter:
+    #   Bollinger Bands (period 11, deviation 3) + SuperTrend (ATR 2,
+    #   multiplier 2). BUY only when >= 3 consecutive green candles sit
+    #   ABOVE the SuperTrend line AND very close to the UPPER Bollinger
+    #   band. The mirrored SELL setup is deliberately NOT traded (spot has
+    #   no shorts; the user asked for the upward side only).
+    # Timeframe note: the source doc uses 15s/30s binary-options candles;
+    # Binance spot klines only go down to 1m, which is also the doc's own
+    # trade duration - so DOUBLE_IND_TIMEFRAME defaults to "1m".
+    # Exit note: the doc has no exits (binary options expire). For spot we
+    # keep the entry rules exact and add a fee-survival exit ladder: on 1m
+    # candles a typical ATR target (0.05-0.2%) is smaller than the 0.2%
+    # round-trip fee, so TP1/TP2/SL carry percentage FLOORS that keep every
+    # trade worth taking after costs (the v5.18 "TP inside fees" lesson).
+    DOUBLE_IND_ENABLED: bool = os.getenv(
+        "DOUBLE_IND_ENABLED", "true").lower() == "true"
+    DOUBLE_IND_TIMEFRAME: str = os.getenv("DOUBLE_IND_TIMEFRAME", "1m")
+    # Scan only the most liquid head of the dynamic universe (sorted by 24h
+    # quote volume): scalping belongs where the book is deep. 15 x weight-2
+    # klines calls = 30 REST weight per cycle (the bottom scanner spends 384).
+    DOUBLE_IND_TOP_N: int = int(os.getenv("DOUBLE_IND_TOP_N", "15"))
+    DOUBLE_IND_KLINES_LIMIT: int = int(os.getenv("DOUBLE_IND_KLINES_LIMIT", "90"))
+    # Exact indicator settings from the user's document.
+    DOUBLE_IND_BB_PERIOD: int = int(os.getenv("DOUBLE_IND_BB_PERIOD", "11"))
+    DOUBLE_IND_BB_DEV: float = float(os.getenv("DOUBLE_IND_BB_DEV", "3.0"))
+    DOUBLE_IND_ST_PERIOD: int = int(os.getenv("DOUBLE_IND_ST_PERIOD", "2"))
+    DOUBLE_IND_ST_MULT: float = float(os.getenv("DOUBLE_IND_ST_MULT", "2.0"))
+    # Entry conditions ("100% or nothing" - the doc's golden rule).
+    DOUBLE_IND_MIN_GREEN: int = int(os.getenv("DOUBLE_IND_MIN_GREEN", "3"))
+    # "Very close to the upper band": last close in the top 10% of the
+    # band range (percent_B >= 0.90) AND the 3-candle run averages >= 0.80.
+    DOUBLE_IND_BB_PCTB_MIN: float = float(
+        os.getenv("DOUBLE_IND_BB_PCTB_MIN", "0.90"))
+    DOUBLE_IND_BB_PCTB_AVG_MIN: float = float(
+        os.getenv("DOUBLE_IND_BB_PCTB_AVG_MIN", "0.80"))
+    # Semi-stable / fee-food gates (1m scale): a pinned coin never passes
+    # the ATR floor; a dead range never passes the rolling-range floor.
+    DOUBLE_IND_MIN_ATR_PCT: float = float(
+        os.getenv("DOUBLE_IND_MIN_ATR_PCT", "0.12"))
+    DOUBLE_IND_MIN_RANGE_PCT: float = float(
+        os.getenv("DOUBLE_IND_MIN_RANGE_PCT", "0.60"))
+    # Fee-survival exit ladder (percentage floors + ATR multiples).
+    # SL = max(1.5 x ATR, SL floor); TP1 = max(1.2 x ATR, TP1 floor);
+    # TP2 = max(2.5 x ATR, TP2 floor); RR is computed on TP2.
+    DOUBLE_IND_SL_MIN_PCT: float = float(
+        os.getenv("DOUBLE_IND_SL_MIN_PCT", "0.55"))
+    DOUBLE_IND_TP1_MIN_PCT: float = float(
+        os.getenv("DOUBLE_IND_TP1_MIN_PCT", "0.50"))
+    DOUBLE_IND_TP2_MIN_PCT: float = float(
+        os.getenv("DOUBLE_IND_TP2_MIN_PCT", "1.00"))
+    DOUBLE_IND_TP1_ATR_MULT: float = float(
+        os.getenv("DOUBLE_IND_TP1_ATR_MULT", "1.2"))
+    DOUBLE_IND_TP2_ATR_MULT: float = float(
+        os.getenv("DOUBLE_IND_TP2_ATR_MULT", "2.5"))
+    DOUBLE_IND_SL_ATR_MULT: float = float(
+        os.getenv("DOUBLE_IND_SL_ATR_MULT", "1.5"))
+    # Confidence mapping for the channel (admission still passes through
+    # validate_recommendation's regime-adjusted MIN_CONFIDENCE gate).
+    DOUBLE_IND_CONF_BASE: float = float(
+        os.getenv("DOUBLE_IND_CONF_BASE", "76.0"))
+    DOUBLE_IND_CONF_CAP: float = float(
+        os.getenv("DOUBLE_IND_CONF_CAP", "80.0"))
+    # Thin-volume burst penalty (below this ratio of the 20-bar average the
+    # 3-candle run is suspect - fee-food filter, ranking only).
+    DOUBLE_IND_MIN_VOL_RATIO: float = float(
+        os.getenv("DOUBLE_IND_MIN_VOL_RATIO", "0.8"))
+    # Channel caps (mirror of the v5.20 bottom-channel clustering guards).
+    DOUBLE_IND_MAX_PER_CYCLE: int = int(
+        os.getenv("DOUBLE_IND_MAX_PER_CYCLE", "1"))
+    DOUBLE_IND_MAX_OPEN_CONCURRENT: int = int(
+        os.getenv("DOUBLE_IND_MAX_OPEN_CONCURRENT", "1"))
+    DOUBLE_IND_ENTRY_SPACING_MIN: float = float(
+        os.getenv("DOUBLE_IND_ENTRY_SPACING_MIN", "20"))
+    # Same burst persists across cycles - do not re-fire a symbol while its
+    # 3-candle run is still the same momentum episode.
+    DOUBLE_IND_SYMBOL_COOLDOWN_MIN: float = float(
+        os.getenv("DOUBLE_IND_SYMBOL_COOLDOWN_MIN", "30"))
+    DOUBLE_IND_BTC_TIDE_GATE: bool = os.getenv(
+        "DOUBLE_IND_BTC_TIDE_GATE", "true").lower() == "true"
+
     # --- Market Map: leader/follower correlation classification (v5.2) ---
     # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).
     # We classify each symbol to its highest-correlated leader and use the

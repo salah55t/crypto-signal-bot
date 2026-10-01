@@ -1,4 +1,5 @@
-"""Strategies package — v5.7 Signal Stack (6 composite strategies).
+"""Strategies package - v5.7 Signal Stack (6 composite strategies) + v5.22
+user-specified double-indicator channel strategy.
 
 The bot uses SIX composite strategies. Every strategy follows the
 "Signal Stack Framework" golden rule: combine ONE indicator from each
@@ -35,6 +36,12 @@ v5.7 user-specified trio (Signal Stack):
 
 Legacy strategies (technical, volume, momentum, etc.) are in legacy/
 folder for reference but no longer used.
+
+v5.22: DoubleIndicatorStrategy (the user's BB(11,3)+SuperTrend(2,2)
+document, spot-only, long-only). It does NOT vote in the 6-strategy
+stack - it trades through its own 1m momentum channel
+(src/analysis/momentum_scanner.py) because its rules are 1-minute
+scalping rules, meaningless on the 4h stack timeframe.
 """
 from .base import BaseStrategy, Signal
 from .trend_pullback_strategy import TrendPullbackStrategy
@@ -43,6 +50,7 @@ from .volatility_breakout_strategy import VolatilityBreakoutStrategy
 from .triple_confluence_trend_strategy import TripleConfluenceTrendStrategy
 from .bb_mean_reversion_strategy import BBMeanReversionStrategy
 from .macd_breakout_strategy import MACDBreakoutStrategy
+from .double_indicator_strategy import DoubleIndicatorStrategy
 
 __all__ = [
     "BaseStrategy", "Signal",
@@ -54,4 +62,6 @@ __all__ = [
     "TripleConfluenceTrendStrategy",
     "BBMeanReversionStrategy",
     "MACDBreakoutStrategy",
+    # v5.22 user double-indicator channel (long-only, spot-only)
+    "DoubleIndicatorStrategy",
 ]

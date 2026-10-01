@@ -41,7 +41,8 @@ FNG_FILE = Path("data/fng_cache.json")
 
 # exact strategy.name values (src/strategies/*)
 TREND_STRATS = {"trend_pullback", "triple_confluence_trend"}
-BREAKOUT_STRATS = {"volatility_breakout", "macd_breakout"}
+BREAKOUT_STRATS = {"volatility_breakout", "macd_breakout",
+                   "double_indicator"}  # v5.22: 1m momentum channel
 MEANREV_STRATS = {"bb_mean_reversion"}
 REVERSAL_STRATS = {"liquidity_sweep_reversal"}
 ALL_STRATS = TREND_STRATS | BREAKOUT_STRATS | MEANREV_STRATS | REVERSAL_STRATS

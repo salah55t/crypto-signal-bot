@@ -238,6 +238,46 @@ class RiskManager:
                         "no counter-tape bounce longs")
         return (True, "")
 
+    def _momentum_channel_ok(self, symbol: str) -> Tuple[bool, str]:
+        """v5.22: clustering + tape caps for the double-indicator channel.
+
+        Same three protections as the bottom channel (v5.20), sized for a
+        1m momentum scalper whose failure mode is re-firing the same burst
+        every cycle and stacking correlated longs on one tape:
+          1. max concurrent open double-indicator positions
+          2. minimum spacing since the newest momentum entry
+          3. no new momentum longs into a bearish 1h BTC regime
+        """
+        moments = [p for p in self.open_positions
+                   if p.get("boosted_from_momentum")]
+        cap = int(settings.DOUBLE_IND_MAX_OPEN_CONCURRENT)
+        if len(moments) >= cap:
+            return (False,
+                    f"momentum concurrent cap ({len(moments)}/{cap} open)")
+        last_ts = None
+        for p in moments:
+            try:
+                t = datetime.fromisoformat(str(p.get("entry_time")))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if last_ts is None or t > last_ts:
+                    last_ts = t
+            except Exception:
+                continue
+        if last_ts is not None:
+            gap_min = (now_utc() - last_ts).total_seconds() / 60.0
+            if gap_min < settings.DOUBLE_IND_ENTRY_SPACING_MIN:
+                return (False,
+                        f"momentum entry spacing ({gap_min:.0f}min < "
+                        f"{settings.DOUBLE_IND_ENTRY_SPACING_MIN:.0f}min)")
+        if settings.DOUBLE_IND_BTC_TIDE_GATE:
+            regime, _score = self._tide_snapshot()
+            if regime == "bearish":
+                return (False,
+                        "momentum tide gate (BTC 1h regime bearish) - "
+                        "no counter-tape momentum longs")
+        return (True, "")
+
     def position_size(self, entry_price: float, stop_loss: float) -> float:
         """
         Compute position size in base currency using fixed fractional risk.
@@ -334,7 +374,10 @@ class RiskManager:
         # a bounce-derived harmony. Without the exemption the strategy-scale
         # gate rejected EVERY bottom rec (no harmony key -> 0.0 < 0.45), which
         # is why the bot never opened a position from bottom coins.
-        if (not rec.get("boosted_from_bottom")
+        # v5.22: momentum-channel recs are exempt for the same contract
+        # reason - their admission is the strategy's binary 100% checklist.
+        if (not (rec.get("boosted_from_bottom")
+                 or rec.get("boosted_from_momentum"))
                 and float(rec.get("harmony", 0.0)) < settings.MIN_HARMONY):
             reasons.append(
                 f"Harmony too low ({rec.get('harmony', 0.0):.2f} "
@@ -373,6 +416,11 @@ class RiskManager:
             _bok, _bwhy = self._bottom_channel_ok(rec.get("symbol", ""))
             if not _bok:
                 return {"status": "rejected", "reasons": [_bwhy]}
+        # v5.22: momentum-channel clustering + tape caps (paper path)
+        if rec.get("boosted_from_momentum"):
+            _mok, _mwhy = self._momentum_channel_ok(rec.get("symbol", ""))
+            if not _mok:
+                return {"status": "rejected", "reasons": [_mwhy]}
 
         entry = rec["current_price"]
         sl = rec["stop_loss"]
@@ -440,6 +488,7 @@ class RiskManager:
             # trade lost - see XAUTUSDT/CRCLBUSDT/TRXUSDT on 2026-09-27).
             "entry_ichimoku_regime": (rec.get("ichimoku") or {}).get("regime"),
             "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
+            "boosted_from_momentum": bool(rec.get("boosted_from_momentum")),
         }
         self.open_positions.append(position)
         save_json(self.open_positions, POSITIONS_FILE)
@@ -494,6 +543,11 @@ class RiskManager:
             _bok, _bwhy = self._bottom_channel_ok(rec.get("symbol", ""))
             if not _bok:
                 return {"status": "rejected", "reasons": [_bwhy]}
+        # v5.22: momentum-channel clustering + tape caps (live path too)
+        if rec.get("boosted_from_momentum"):
+            _mok, _mwhy = self._momentum_channel_ok(rec.get("symbol", ""))
+            if not _mok:
+                return {"status": "rejected", "reasons": [_mwhy]}
 
         symbol = rec["symbol"]
         entry = rec["current_price"]
@@ -589,6 +643,7 @@ class RiskManager:
                 # v5.18: entry-coherence snapshot (see open_paper_position)
                 "entry_ichimoku_regime": (rec.get("ichimoku") or {}).get("regime"),
                 "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
+                "boosted_from_momentum": bool(rec.get("boosted_from_momentum")),
             }
             self.open_positions.append(position)
             save_json(self.open_positions, POSITIONS_FILE)
@@ -1246,8 +1301,12 @@ class RiskManager:
             # flag a restart (Render redeploys constantly) silently strips
             # the v5.19 structural-exit immunity and disables the v5.20
             # stagnation exit / clustering caps for surviving positions.
+            # v5.22: same contract for the momentum channel (strategy name
+            # "double_indicator") - flag restore survives redeploys too.
             "boosted_from_bottom": (
                 (row.get("strategy") or "") == "bottom_scanner_boost"),
+            "boosted_from_momentum": (
+                (row.get("strategy") or "") == "double_indicator"),
             "risk_updates": [],
             "restored_from_db": True,
         }
