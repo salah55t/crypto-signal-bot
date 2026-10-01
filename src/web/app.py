@@ -741,6 +741,17 @@ def monitor_positions_sync():
         log.debug(f"Position monitor error: {e}")
 
 
+def scalp_scan_sync():
+    """v5.25: micro-scalp tick - runs every SCALP_SCAN_EVERY_MIN minutes.
+    Delegates to the unified scalp scanner (true 15s/30s candles from 1s
+    klines, long-only, fixed 60s holding)."""
+    try:
+        from src.core.cycle import run_scalp_scan
+        run_scalp_scan()
+    except Exception as e:
+        log.debug(f"Scalp scan error: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on app startup."""
@@ -787,6 +798,22 @@ async def startup_event():
             name="position_monitor",
             misfire_grace_time=60,
         )
+        # v5.25: micro-scalp scanner (true 15s/30s candles from 1s klines,
+        # long-only, fixed 60s holding) - its own job so the watcher's
+        # early-return (no positions) can never silence it
+        if settings.SCALP_ENABLED:
+            scheduler.add_job(
+                scalp_scan_sync,
+                trigger=IntervalTrigger(
+                    minutes=max(1, settings.SCALP_SCAN_EVERY_MIN)),
+                id="scalp_scan",
+                name="scalp_scan",
+                misfire_grace_time=30,
+            )
+            log.info(
+                f"[cyan]Scalp scanner armed[/] - every "
+                f"{max(1, settings.SCALP_SCAN_EVERY_MIN)} min, hold fixed "
+                f"{settings.SCALP_HOLD_SECONDS}s")
         scheduler.start()
         log.info(f"[green]Scheduler started[/] - analysis: '{settings.SCHEDULE_CRON}', monitor: every 1 min")
 

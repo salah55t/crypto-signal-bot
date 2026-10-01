@@ -21,7 +21,13 @@ from src.utils.helpers import retry_on_failure
 class DataFetcher:
     """Fetches OHLCV data and order book snapshots for analysis."""
 
-    INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+    # v5.25: "1s" added - the only sub-minute interval Binance spot offers.
+    # It is the building block of the micro-scalper: 1s bars are fetched and
+    # resampled locally into the strategy's true 15s/30s candles. NOTE: "1s"
+    # is deliberately NOT part of settings.WS_INTERVALS (a @kline_1s stream
+    # for the whole universe would explode the WS message rate); it always
+    # takes the REST path via get_candles().
+    INTERVALS = {"1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
                  "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
 
     def __init__(self):

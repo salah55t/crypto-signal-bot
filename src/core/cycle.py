@@ -337,6 +337,23 @@ def run_position_watch():
 
 
 # ------------------------------------------------------------------
+# STEP 2b (scalper): v5.25 micro-scalp scan - the user's strategy on true
+# 15s/30s candles resampled from 1s klines, long-only, FIXED 1-minute hold
+# ------------------------------------------------------------------
+def run_scalp_scan():
+    """One micro-scalp tick (every SCALP_SCAN_EVERY_MIN minutes in both
+    hosts): scan the liquid head on true 15s/30s candles, open positions
+    for 100%-checklist signals, notify. Zero work when disabled."""
+    if not settings.SCALP_ENABLED:
+        return
+    try:
+        from src.analysis.scalp_scanner import scalp_scanner
+        scalp_scanner.tick()
+    except Exception as e:
+        log.debug(f"Scalp scan error: {e}")
+
+
+# ------------------------------------------------------------------
 # STEP 3: open new positions (all veteran gates)
 # ------------------------------------------------------------------
 def open_new_positions(recommendations: List[Dict]) -> int:

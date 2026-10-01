@@ -278,6 +278,46 @@ class RiskManager:
                         "no counter-tape momentum longs")
         return (True, "")
 
+    def _scalp_channel_ok(self, symbol: str) -> Tuple[bool, str]:
+        """v5.25: clustering + tape caps for the micro-scalp channel.
+
+        Same three protections as bottom/momentum (v5.20/v5.22), sized for
+        a fixed-60s-hold scalper whose failure mode is machine-gunning the
+        same burst tick after tick:
+          1. max concurrent open micro-scalp positions
+          2. minimum spacing since the newest scalp entry
+          3. no new scalp longs into a bearish 1h BTC regime
+        """
+        scalps = [p for p in self.open_positions
+                  if p.get("boosted_from_scalp")]
+        cap = int(settings.SCALP_MAX_OPEN_CONCURRENT)
+        if len(scalps) >= cap:
+            return (False,
+                    f"scalp concurrent cap ({len(scalps)}/{cap} open)")
+        last_ts = None
+        for p in scalps:
+            try:
+                t = datetime.fromisoformat(str(p.get("entry_time")))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if last_ts is None or t > last_ts:
+                    last_ts = t
+            except Exception:
+                continue
+        if last_ts is not None:
+            gap_min = (now_utc() - last_ts).total_seconds() / 60.0
+            if gap_min < settings.SCALP_ENTRY_SPACING_MIN:
+                return (False,
+                        f"scalp entry spacing ({gap_min:.1f}min < "
+                        f"{settings.SCALP_ENTRY_SPACING_MIN:.1f}min)")
+        if settings.SCALP_BTC_TIDE_GATE:
+            regime, _score = self._tide_snapshot()
+            if regime == "bearish":
+                return (False,
+                        "scalp tide gate (BTC 1h regime bearish) - "
+                        "no counter-tape scalp longs")
+        return (True, "")
+
     def position_size(self, entry_price: float, stop_loss: float) -> float:
         """
         Compute position size in base currency using fixed fractional risk.
@@ -376,8 +416,11 @@ class RiskManager:
         # is why the bot never opened a position from bottom coins.
         # v5.22: momentum-channel recs are exempt for the same contract
         # reason - their admission is the strategy's binary 100% checklist.
+        # v5.25: micro-scalp recs are exempt too - their admission is the
+        # same binary checklist on true 15s/30s candles.
         if (not (rec.get("boosted_from_bottom")
-                 or rec.get("boosted_from_momentum"))
+                 or rec.get("boosted_from_momentum")
+                 or rec.get("boosted_from_scalp"))
                 and float(rec.get("harmony", 0.0)) < settings.MIN_HARMONY):
             reasons.append(
                 f"Harmony too low ({rec.get('harmony', 0.0):.2f} "
@@ -421,6 +464,11 @@ class RiskManager:
             _mok, _mwhy = self._momentum_channel_ok(rec.get("symbol", ""))
             if not _mok:
                 return {"status": "rejected", "reasons": [_mwhy]}
+        # v5.25: micro-scalp channel clustering + tape caps (paper path)
+        if rec.get("boosted_from_scalp"):
+            _sok, _swhy = self._scalp_channel_ok(rec.get("symbol", ""))
+            if not _sok:
+                return {"status": "rejected", "reasons": [_swhy]}
 
         entry = rec["current_price"]
         sl = rec["stop_loss"]
@@ -489,6 +537,7 @@ class RiskManager:
             "entry_ichimoku_regime": (rec.get("ichimoku") or {}).get("regime"),
             "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
             "boosted_from_momentum": bool(rec.get("boosted_from_momentum")),
+            "boosted_from_scalp": bool(rec.get("boosted_from_scalp")),
         }
         self.open_positions.append(position)
         save_json(self.open_positions, POSITIONS_FILE)
@@ -548,6 +597,11 @@ class RiskManager:
             _mok, _mwhy = self._momentum_channel_ok(rec.get("symbol", ""))
             if not _mok:
                 return {"status": "rejected", "reasons": [_mwhy]}
+        # v5.25: micro-scalp channel clustering + tape caps (live path too)
+        if rec.get("boosted_from_scalp"):
+            _sok, _swhy = self._scalp_channel_ok(rec.get("symbol", ""))
+            if not _sok:
+                return {"status": "rejected", "reasons": [_swhy]}
 
         symbol = rec["symbol"]
         entry = rec["current_price"]
@@ -644,6 +698,7 @@ class RiskManager:
                 "entry_ichimoku_regime": (rec.get("ichimoku") or {}).get("regime"),
                 "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
                 "boosted_from_momentum": bool(rec.get("boosted_from_momentum")),
+                "boosted_from_scalp": bool(rec.get("boosted_from_scalp")),
             }
             self.open_positions.append(position)
             save_json(self.open_positions, POSITIONS_FILE)
@@ -876,6 +931,17 @@ class RiskManager:
             return 0.0
 
     @staticmethod
+    def _position_age_seconds(pos: Dict) -> float:
+        """v5.25: seconds-precision age for the micro-scalp fixed hold."""
+        try:
+            entered = datetime.fromisoformat(pos["entry_time"])
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=timezone.utc)
+            return (now_utc() - entered).total_seconds()
+        except Exception:
+            return 0.0
+
+    @staticmethod
     def track_excursions(pos: Dict, price: float) -> None:
         """v5: update peak/trough + MFE/MAE since entry (in-place, cheap)."""
         if not price or not pos.get("entry_price"):
@@ -902,7 +968,19 @@ class RiskManager:
         fits trend trades; a bounce that has not appeared within 6h with
         pnl < 0.2% and MFE < 0.6% never worked (INTCB: -2.59% over 11.6h
         with MFE 0.22%; ZAMA: -5.71% with MFE 0.11%). Close early, recycle
-        the slot, keep the loss small."""
+        the slot, keep the loss small.
+        v5.25: micro-scalp FIXED holding window - the document's 1-minute
+        expiry. Seconds-precision: the watcher ticks every minute, so a
+        scalp closes on the first tick past SCALP_HOLD_SECONDS (60-120s
+        real holding). The only earlier door is the disaster SL (checked
+        before this in check_open_positions)."""
+        if pos.get("boosted_from_scalp"):
+            age_s = self._position_age_seconds(pos)
+            hold_s = float(max(1, settings.SCALP_HOLD_SECONDS))
+            if age_s >= hold_s:
+                return (f"Scalp time exit: fixed {hold_s:.0f}s holding "
+                        f"completed ({age_s:.0f}s, pnl {pnl_pct:+.2f}%)")
+            return None
         age_h = self._position_age_hours(pos)
         if age_h >= settings.ABSOLUTE_MAX_TRADE_HOURS:
             return (f"Max holding time reached "
@@ -965,6 +1043,13 @@ class RiskManager:
           conf >= SIGNAL_TIGHTEN_CONF (40)    -> defend: SL 0.5% below price
         """
         if not settings.STRUCTURAL_EXITS_ENABLED or not sig:
+            return ("none", None)
+        # v5.25: micro-scalp positions have a FIXED holding window (the
+        # document's 1-minute expiry). No structural/signal exit applies -
+        # the watcher's disaster SL and the scalp time exit are the only
+        # doors; an analysis-cycle "flip" on 4h candles is meaningless for
+        # a trade that lives 60 seconds.
+        if pos.get("boosted_from_scalp"):
             return ("none", None)
         icho = sig.get("ichimoku") or {}
         direction = pos.get("direction", "bullish")
@@ -1307,6 +1392,11 @@ class RiskManager:
                 (row.get("strategy") or "") == "bottom_scanner_boost"),
             "boosted_from_momentum": (
                 (row.get("strategy") or "") == "double_indicator"),
+            # v5.25: same contract for the micro-scalp channel - a scalp
+            # position restored after a redeploy keeps its fixed-hold time
+            # exit and structural immunity.
+            "boosted_from_scalp": (
+                (row.get("strategy") or "") == "micro_scalp"),
             "risk_updates": [],
             "restored_from_db": True,
         }
@@ -1417,6 +1507,12 @@ class RiskManager:
             current_tp = pos["take_profit"]
             current = current_prices.get(symbol)
             if not current or not entry:
+                continue
+
+            # v5.25: fixed-hold scalps are never trailed - the position dies
+            # at the 60s time exit anyway; ladder/chandelier tightening would
+            # just close it early through the back door.
+            if pos.get("boosted_from_scalp"):
                 continue
 
             self.track_excursions(pos, current)

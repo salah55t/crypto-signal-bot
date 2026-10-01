@@ -71,3 +71,4 @@ Thumbs.db
 .coverage
 htmlcov/
 telegram_state.json
+scalp_signals.json

@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from config.settings import settings
 from src.core.scheduler import scheduler
-from src.core.cycle import run_analysis_cycle, run_position_watch
+from src.core.cycle import run_analysis_cycle, run_position_watch, run_scalp_scan
 from src.risk.manager import risk_manager
 from src.utils.logger import log
 
@@ -56,6 +56,19 @@ def main():
         scheduler.add_job(
             run_position_watch, cron="* * * * *", job_id="position_watch"
         )
+        # v5.25: micro-scalp scanner (true 15s/30s candles from 1s klines,
+        # long-only, fixed 60s holding) - its own job, not the watcher,
+        # so the watcher's early-return (no positions) can never silence it
+        if settings.SCALP_ENABLED:
+            scheduler.add_job(
+                run_scalp_scan,
+                cron=f"*/{max(1, settings.SCALP_SCAN_EVERY_MIN)} * * * *",
+                job_id="scalp_scan",
+            )
+            log.info(
+                f"[cyan]Scalp scanner armed[/] - every "
+                f"{max(1, settings.SCALP_SCAN_EVERY_MIN)} min, hold fixed "
+                f"{settings.SCALP_HOLD_SECONDS}s")
         scheduler.start()
 
 

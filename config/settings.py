@@ -540,6 +540,71 @@ class Settings:
     DOUBLE_IND_BTC_TIDE_GATE: bool = os.getenv(
         "DOUBLE_IND_BTC_TIDE_GATE", "true").lower() == "true"
 
+    # --- Micro-Scalper: the user's strategy on TRUE 15s/30s candles (v5.25) ---
+    # Same indicators and rules as DOUBLE_IND (BB 11/3 + SuperTrend 2/2,
+    # long-only, the 100% binary checklist) - but now on the document's REAL
+    # timeframes: Binance spot has no 15s/30s kline intervals, so the scanner
+    # pulls 1s klines (weight 5 per 1000 bars) and RESAMPLES them locally.
+    # Trade duration is FIXED at 1 minute (the doc's expiry): the watcher
+    # closes scalp positions on the first tick past SCALP_HOLD_SECONDS.
+    SCALP_ENABLED: bool = os.getenv(
+        "SCALP_ENABLED", "true").lower() == "true"
+    # Scan the liquid head of the universe (sorted by 24h quote volume).
+    # 15 symbols x weight-5 (1s klines, limit 1000) = 75 REST weight/tick.
+    SCALP_TOP_N: int = int(os.getenv("SCALP_TOP_N", "15"))
+    SCALP_KLINES_LIMIT: int = int(os.getenv("SCALP_KLINES_LIMIT", "1000"))
+    # Timeframe selection (the doc: 15s candles for a fast-but-calm market,
+    # 30s candles for a very strong/fast market). Speed proxy = the absolute
+    # move of the 1s closes over the last SCALP_SPEED_WINDOW_S seconds.
+    SCALP_TF_CALM: str = os.getenv("SCALP_TF_CALM", "15")
+    SCALP_TF_FAST: str = os.getenv("SCALP_TF_FAST", "30")
+    SCALP_SPEED_WINDOW_S: int = int(os.getenv("SCALP_SPEED_WINDOW_S", "300"))
+    SCALP_FAST_MOVE_PCT: float = float(os.getenv("SCALP_FAST_MOVE_PCT", "0.50"))
+    # The entry checklist - exact indicator settings from the document.
+    SCALP_BB_PERIOD: int = int(os.getenv("SCALP_BB_PERIOD", "11"))
+    SCALP_BB_DEV: float = float(os.getenv("SCALP_BB_DEV", "3.0"))
+    SCALP_ST_PERIOD: int = int(os.getenv("SCALP_ST_PERIOD", "2"))
+    SCALP_ST_MULT: float = float(os.getenv("SCALP_ST_MULT", "2.0"))
+    SCALP_MIN_GREEN: int = int(os.getenv("SCALP_MIN_GREEN", "3"))
+    # "Very close to the upper band": last close within SCALP_BB_NEAR_PCT % of
+    # the upper band (geometric nearness - on 15s candles the band range
+    # swings so widely that a percent_B threshold would be unstable).
+    SCALP_BB_NEAR_PCT: float = float(os.getenv("SCALP_BB_NEAR_PCT", "0.12"))
+    # Micro-scale anti-dead-market gates (resampled-TF scale): a pinned coin
+    # cannot print three real green candles near the band, but stale/zero-
+    # volume data can - the floors keep fee-food out.
+    SCALP_MIN_ATR_PCT: float = float(os.getenv("SCALP_MIN_ATR_PCT", "0.02"))
+    SCALP_MIN_RANGE_PCT: float = float(
+        os.getenv("SCALP_MIN_RANGE_PCT", "0.15"))
+    # FIXED trade duration - the document's 1-minute holding, in seconds.
+    SCALP_HOLD_SECONDS: int = int(os.getenv("SCALP_HOLD_SECONDS", "60"))
+    # Spot-adaptation exit ladder, sized so the TIME EXIT dominates (the doc
+    # has no exits - its trades expire). The SL is a disaster stop only:
+    # SL floor 0.8% of price (survives 60s noise), TP2 = 2x the SL distance
+    # (RR >= 2 by construction so the RR gate never blocks), TP1 a quick
+    # partial at 0.35% that may or may not print inside the minute.
+    SCALP_SL_MIN_PCT: float = float(os.getenv("SCALP_SL_MIN_PCT", "0.80"))
+    SCALP_TP1_MIN_PCT: float = float(os.getenv("SCALP_TP1_MIN_PCT", "0.35"))
+    SCALP_TP2_MIN_PCT: float = float(os.getenv("SCALP_TP2_MIN_PCT", "1.60"))
+    SCALP_SL_ATR_MULT: float = float(os.getenv("SCALP_SL_ATR_MULT", "1.5"))
+    SCALP_TP1_ATR_MULT: float = float(os.getenv("SCALP_TP1_ATR_MULT", "1.2"))
+    SCALP_TP2_RR_MULT: float = float(os.getenv("SCALP_TP2_RR_MULT", "2.0"))
+    SCALP_CONF_BASE: float = float(os.getenv("SCALP_CONF_BASE", "72.0"))
+    SCALP_CONF_CAP: float = float(os.getenv("SCALP_CONF_CAP", "76.0"))
+    # Channel caps (mirror of the v5.22 momentum channel, sized for a 60s
+    # scalper whose failure mode is machine-gunning the same burst).
+    SCALP_MAX_PER_TICK: int = int(os.getenv("SCALP_MAX_PER_TICK", "1"))
+    SCALP_MAX_OPEN_CONCURRENT: int = int(
+        os.getenv("SCALP_MAX_OPEN_CONCURRENT", "1"))
+    SCALP_ENTRY_SPACING_MIN: float = float(
+        os.getenv("SCALP_ENTRY_SPACING_MIN", "3"))
+    SCALP_SYMBOL_COOLDOWN_MIN: float = float(
+        os.getenv("SCALP_SYMBOL_COOLDOWN_MIN", "15"))
+    SCALP_BTC_TIDE_GATE: bool = os.getenv(
+        "SCALP_BTC_TIDE_GATE", "true").lower() == "true"
+    # Scan cadence (minutes) for the dedicated scalp job in both hosts.
+    SCALP_SCAN_EVERY_MIN: int = int(os.getenv("SCALP_SCAN_EVERY_MIN", "1"))
+
     # --- Market Map: leader/follower correlation classification (v5.2) ---
     # Many altcoins chart almost identically to a major (BTC/SOL/XRP...).
     # We classify each symbol to its highest-correlated leader and use the
