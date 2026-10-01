@@ -31,7 +31,17 @@ class DataFetcher:
 
     @staticmethod
     def klines_to_df(raw_klines: List[List]) -> pd.DataFrame:
-        """Convert raw Binance klines to a clean DataFrame."""
+        """Convert raw Binance klines to a clean DataFrame.
+
+        v5.24: timestamp columns are normalized ELEMENT-WISE. Producers mix
+        types - REST rows carry int-ms (and the cache `ingest()` used to
+        carry pandas Timestamps in `close_time`!) while live WS event rows
+        carry int-ms - and `pd.to_datetime(..., unit='ms')` RAISES on the
+        mixture (production 2026-10-01: every WS-touched series became
+        unreadable -> a degraded WS-only cycle served 1 of 92 symbols with
+        the failure swallowed into get_cached()'s None). One int-ms value
+        next to a Timestamp no longer poisons the column.
+        """
         if not raw_klines:
             return pd.DataFrame()
         columns = [
@@ -40,16 +50,30 @@ class DataFetcher:
             "taker_buy_quote", "ignore"
         ]
         df = pd.DataFrame(raw_klines, columns=columns)
-        # Convert timestamps
+        # Convert timestamps (element-wise int-ms normalization first)
+        for col in ("open_time", "close_time"):
+            df[col] = df[col].map(
+                lambda v: v if isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                else DataFetcher._ts_to_ms(v))
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
         df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
         # Cast numerics
         numeric_cols = ["open", "high", "low", "close", "volume",
-                        "quote_volume", "trades", "taker_buy_base", "taker_buy_quote"]
+                        "quote_volume", "trades", "taker_buy_base",
+                        "taker_buy_quote"]
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
         df.set_index("open_time", inplace=True)
         df.drop(columns=["ignore"], inplace=True)
         return df
+
+    @staticmethod
+    def _ts_to_ms(v) -> Optional[int]:
+        """v5.24: best-effort conversion of any timestamp-ish value to ms."""
+        try:
+            return int(pd.Timestamp(v).timestamp() * 1000)
+        except Exception:
+            return None
 
     @staticmethod
     @retry_on_failure

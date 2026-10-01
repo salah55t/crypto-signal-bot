@@ -72,6 +72,21 @@ def _mid_feed(symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT")):
     return _mk_feed(symbols, 100)
 
 
+def _raw_rows(n=200):
+    """Raw REST-format kline rows (what klines_to_df actually consumes)."""
+    start = 1_700_000_000_000
+    rows = []
+    px = 100.0
+    for i in range(n):
+        o = px
+        c = px * 1.01
+        rows.append([start + i * 3_600_000, o, c * 1.02, c * 0.98, c,
+                     10.0 + i, start + (i + 1) * 3_600_000 - 1,
+                     o * 12.0, 100, 5.0, o * 6.0, "rest"])
+        px = c
+    return rows
+
+
 def _fake_candles(n):
     idx = pd.date_range("2026-01-01", periods=n, freq="1h",
                         tz="UTC", name="open_time")
@@ -390,3 +405,132 @@ class TestContract:
         assert "gate_skip_streak" in src
         wsrc = Path("src/core/ws_feed.py").read_text(encoding="utf-8")
         assert "servable_pct" in wsrc and "cache_status" in wsrc
+
+
+# ---------- 6. THE hidden killer: mixed-type cache rows ----------
+
+def _raw_rows(n=200):
+    """Raw REST-format kline rows (what klines_to_df actually consumes)."""
+    start = 1_700_000_000_000
+    rows = []
+    px = 100.0
+    for i in range(n):
+        o = px
+        c = px * 1.01
+        rows.append([start + i * 3_600_000, o, c * 1.02, c * 0.98, c,
+                     10.0 + i, start + (i + 1) * 3_600_000 - 1,
+                     o * 12.0, 100, 5.0, o * 6.0, "rest"])
+        px = c
+    return rows
+
+
+def _touch_with_ws_row(f, symbol, interval, open_ms):
+    """Append one live WS kline event row (int-ms ts, string OHLCV)."""
+    row = [open_ms, "99.0", "101.0", "98.0", "100.5", "12.5",
+           open_ms + 3_599_999, "156.25", 42, "6.0", "75.0", "ws"]
+    with f._lock:
+        bars = f._bars[f._key(symbol, interval)]
+        if bars[-1][0] == row[0]:
+            bars[-1] = row
+        else:
+            bars.append(row)
+        f._last_event[f._key(symbol, interval)] = time.monotonic()
+
+
+class TestMixedRowTimestamps:
+    """Production 2026-10-01 14:30 UTC: a degraded WS-only cycle served ONE
+    symbol of 92 ('symbols_with_data': 1). Root cause: ws_feed.ingest()
+    stored pandas Timestamp close_time (from the already-parsed REST df)
+    while live WS event rows store int-ms - and pd.to_datetime(unit='ms')
+    RAISES on the mixture. get_cached() swallowed the exception into None,
+    so every WS-touched series became unreadable exactly when the REST ban
+    made the WS cache the only data source."""
+
+    def test_ingest_stores_int_ms_close_time(self):
+        """Source fix: ingest() must normalize Timestamp close_time to ms."""
+        from src.core.data_fetcher import DataFetcher
+        f = WSKlineFeed()
+        f._started = True
+        f._universe = ["TONUSDT"]
+        f.ingest("TONUSDT", DataFetcher.klines_to_df(_raw_rows(50)),
+                 interval="4h")
+        for r in f._bars[f._key("TONUSDT", "4h")]:
+            assert isinstance(r[6], int), f"close_time not int-ms: {r[6]!r}"
+
+    def test_ws_touched_series_remains_served(self):
+        """The full poisoned state: REST-seeded + WS-touched must SERVE."""
+        from src.core.data_fetcher import DataFetcher
+        f = WSKlineFeed()
+        f._started = True
+        f._universe = ["TONUSDT"]
+        f.ingest("TONUSDT", DataFetcher.klines_to_df(_raw_rows(200)),
+                 interval="4h")
+        _touch_with_ws_row(f, "TONUSDT", "4h",
+                           1_700_000_000_000 + 200 * 3_600_000)
+        df = f.get_cached("TONUSDT", 200, interval="4h")
+        assert df is not None and len(df) == 200
+        assert df["close"].iloc[-1] == 100.5      # the WS string row coerced
+
+    def test_klines_to_df_survives_any_timestamp_mixture(self):
+        """klines_to_df itself normalizes int/Timestamp/str timestamps."""
+        from src.core.data_fetcher import DataFetcher
+        rows = [
+            [1700000000000, "1.0", "2.0", "0.5", "1.5", "10",
+             1700003599999, "12", "5", "5", "6", "ws"],
+            [1700003600000, 2.0, 3.0, 1.5, 2.5, 10.0,
+             pd.Timestamp("2023-11-15 00:33:20", tz="UTC"), 12.0, 5, 5.0, 6.0,
+             "rest"],
+            [1700007200000, "2.5", "3.5", "2.0", "3.0", "10",
+             "2023-11-15 01:46:39.999", "12", "5", "5", "6", "rest"],
+        ]
+        df = DataFetcher.klines_to_df(rows)
+        assert len(df) == 3
+        assert df.index.name == "open_time"
+        assert df["close_time"].notna().all()
+
+    def test_full_ws_only_cycle_serves_every_symbol(self):
+        """End-to-end: seed -> WS touch -> cooldown -> get_candles + analyze.
+
+        Uses the SINGLETON (DataFetcher.get_candles reads module-level
+        ws_feed, not any local instance); state fully restored afterwards.
+        """
+        from types import SimpleNamespace
+        import src.core.rate_limiter as rl
+        from src.core.data_fetcher import DataFetcher
+        from src.analysis.analyzer import analyzer as real_analyzer
+
+        f = wsmod.ws_feed                       # the singleton
+        saved = (f._started, dict(f._bars), dict(f._last_event))
+        # Production runs CANDLE_LIMIT=200 (Render env) - match it, since the
+        # test seeds exactly the depth production's seeder would.
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(settings, "CANDLE_LIMIT", 200)
+        try:
+            f._started = True
+            f._universe = ["TONUSDT", "AAAUSDT"]
+            f._bars.clear()
+            f._last_event.clear()
+            for s in f._universe:
+                for iv in ("1h", "4h"):
+                    f.ingest(s, DataFetcher.klines_to_df(_raw_rows(200)),
+                             interval=iv)
+                    with f._lock:
+                        f._last_event[f._key(s, iv)] = time.monotonic()
+            for s in f._universe:
+                _touch_with_ws_row(f, s, "4h",
+                                   1_700_000_000_000 + 201 * 3_600_000)
+
+            orig = rl.rate_limiter
+            rl.rate_limiter = SimpleNamespace(cooldown_remaining=lambda: 290.0)
+            try:
+                served = DataFetcher.get_candles("TONUSDT", "4h", 200)
+                assert served is not None and len(served) == 200
+                r = real_analyzer.analyze_one("TONUSDT", ws_only=True)
+                assert not r.get("skip"), f"still skipping: {r.get('reason')}"
+            finally:
+                rl.rate_limiter = orig
+        finally:
+            monkey.undo()
+            f._started = saved[0]
+            f._bars.clear(); f._bars.update(saved[1])
+            f._last_event.clear(); f._last_event.update(saved[2])

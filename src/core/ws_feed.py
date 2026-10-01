@@ -41,6 +41,8 @@ import time
 from collections import deque
 from typing import Dict, Optional
 
+import pandas as pd
+
 from config.settings import settings
 from src.utils.logger import log
 
@@ -514,10 +516,22 @@ class WSKlineFeed:
         try:
             rows = []
             for ts, r in df.tail(self.MAX_BARS).iterrows():
+                # v5.24: close_time arrives as a pandas Timestamp (the df was
+                # already parsed) while live WS event rows carry int-ms.
+                # Storing the mixture made klines_to_df(unit='ms') RAISE on
+                # the first read after any WS update -> get_cached() returned
+                # None for every WS-touched series (the hidden killer behind
+                # the 1-of-92 degraded cycle). Normalize to int-ms HERE.
+                ct = r.get("close_time")
+                if not isinstance(ct, (int, float)) or isinstance(ct, bool):
+                    try:
+                        ct = int(pd.Timestamp(ct).timestamp() * 1000)
+                    except Exception:
+                        ct = int(ts.timestamp() * 1000)
                 rows.append([
                     int(ts.timestamp() * 1000),
                     r.get("open"), r.get("high"), r.get("low"), r.get("close"),
-                    r.get("volume"), r.get("close_time"), r.get("quote_volume"),
+                    r.get("volume"), ct, r.get("quote_volume"),
                     r.get("trades"), r.get("taker_buy_base"),
                     r.get("taker_buy_quote"), "rest",
                 ])
