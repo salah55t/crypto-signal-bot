@@ -100,6 +100,21 @@ class WSKlineFeed:
         self._last_disconnect_gap = 0.0
         self._needs_reseed = False      # True after a long reconnect gap
         self._seed_busy = False         # v5.14: one hydration worker at a time
+        # v5.24: seeder bookkeeping. The old `_missing_keys()` only checked
+        # key EXISTENCE - but live WS kline events create 1-bar cache entries
+        # for every subscribed symbol the moment the socket connects, so on a
+        # boot that lands inside a REST cooldown the seeder saw "nothing to
+        # do" while every series sat permanently below the depth the analyzer
+        # needs. Coverage stayed 0.0 and not one cycle could run (neither
+        # REST nor WS-only) - the bot looked dead. Now:
+        #   _seed_failed: key -> last-failure monotonic ts (retry after
+        #                 WS_SEED_RETRY_AFTER_S; delisted symbols cost no
+        #                 weight but transient errors must not spin)
+        #   _seed_short:  keys whose REST fetch returned FEWER bars than
+        #                 requested (new listings with little history) -
+        #                 data exhausted, do not re-sweep until universe change
+        self._seed_failed: Dict[str, float] = {}
+        self._seed_short: set = set()
         self._reconnect_delay = 5.0
         self._last_msg_ts = 0.0
         self._msg_count = 0
@@ -137,9 +152,18 @@ class WSKlineFeed:
             merged = sorted(wanted | self._pinned)
             changed = merged != self._universe
             self._universe = merged
+            if changed:
+                # v5.24: a new universe invalidates seeder memory - a symbol
+                # that failed/ran out of history before may be valid now.
+                self._seed_failed.clear()
+                self._seed_short.clear()
         if changed and self._started:
             log.info(f"[cyan]WS feed[/] universe changed ({len(merged)} symbols) - reconnecting")
             self._restart()
+        # v5.24: lazy worker trigger - the old design only started the seeder
+        # from _on_open, so a worker that exited (nothing "missing" per the
+        # old depth-blind check) was never restarted until a reconnect.
+        self.ensure_seed_worker()
 
     def set_pinned(self, symbols) -> None:
         """v5.23: replace the pinned-symbol set (open positions + pendings).
@@ -158,6 +182,9 @@ class WSKlineFeed:
             merged = sorted(set(self._universe) | wanted)
             changed = merged != self._universe
             self._universe = merged
+            if changed:
+                self._seed_failed.clear()   # v5.24: see update_universe
+                self._seed_short.clear()
         if changed and self._started:
             log.info(
                 f"[cyan]WS feed[/] pinned symbols updated ({len(wanted)} "
@@ -321,12 +348,55 @@ class WSKlineFeed:
         return max(self._last_event.values())
 
     def _missing_keys(self) -> list:
-        """v5.14: (symbol, interval) pairs of the universe with no cache yet."""
+        """(symbol, interval) pairs of the universe the seeder must fetch.
+
+        v5.14: pairs with no cache at all.
+        v5.24: DEPTH-AWARE. Live WS kline events create 1-bar entries for
+        every subscribed symbol, so "key exists" never meant "cache usable".
+        A key counts as missing while it holds fewer bars than
+        CANDLE_LIMIT - exactly the depth `get_cached(limit=CANDLE_LIMIT)`
+        demands before it will serve the analyzer. Recently-failed keys are
+        excluded for WS_SEED_RETRY_AFTER_S and short-history keys (new
+        listings) until the universe changes, so the paced worker can never
+        spin on a hopeless target.
+        """
+        now = time.monotonic()
+        retry_after = max(60.0, float(getattr(
+            settings, "WS_SEED_RETRY_AFTER_S", 1800)))
+        deep_min = max(1, int(settings.CANDLE_LIMIT))
         with self._lock:
-            return [(s, iv)
-                    for s in self._universe
-                    for iv in self._intervals()
-                    if self._key(s, iv) not in self._bars]
+            out = []
+            for s in self._universe:
+                for iv in self._intervals():
+                    key = self._key(s, iv)
+                    fail_ts = self._seed_failed.get(key)
+                    if fail_ts is not None and (now - fail_ts) <= retry_after:
+                        continue
+                    if key in self._seed_short:
+                        continue
+                    bars = self._bars.get(key)
+                    if bars is None or len(bars) < deep_min:
+                        out.append((s, iv))
+            return out
+
+    def ensure_seed_worker(self) -> bool:
+        """v5.24: start the paced seeder when there is something to deepen.
+
+        Safe to call from anywhere (gate, universe updates, health polls):
+        no-op when the feed is off, a worker already runs, or the cache is
+        complete. Returns True when a worker was actually started.
+        """
+        if not settings.USE_WS_FEED or not self._started or self._stop:
+            return False
+        with self._lock:
+            if self._seed_busy:
+                return False
+        if not self._missing_keys():
+            return False
+        threading.Thread(
+            target=self._seed_missing, name="ws-seed-missing", daemon=True
+        ).start()
+        return True
 
     def _seed_missing(self):
         """v5.14: pace-seed every missing (symbol, interval) series via REST.
@@ -344,13 +414,15 @@ class WSKlineFeed:
         try:
             from src.core.data_fetcher import DataFetcher  # lazy: circulars
             from src.core.rate_limiter import rate_limiter, RateLimitError
-            failed = set()
+            round_failed = set()   # v5.24: no infinite retry inside one sweep
             total_seeded = 0
             while not self._stop:
-                wanted = [k for k in self._missing_keys() if k not in failed]
+                wanted = [k for k in self._missing_keys()
+                          if k not in round_failed]
                 if not wanted:
                     break
                 sym, interval = wanted[0]
+                key = self._key(sym, interval)
                 left = rate_limiter.cooldown_remaining()
                 if left > 0:
                     # a ban dooms every REST call - wait it out (capped
@@ -362,11 +434,23 @@ class WSKlineFeed:
                         sym, interval, settings.CANDLE_LIMIT)
                     self.ingest(sym, df, interval=interval)
                     total_seeded += 1
+                    # v5.24: history exhausted (brand-new listing returns
+                    # fewer bars than asked) - remember so the sweep never
+                    # re-fetches this key until the universe changes.
+                    if df is None or len(df) < int(settings.CANDLE_LIMIT):
+                        with self._lock:
+                            self._seed_short.add(key)
                 except RateLimitError:
                     time.sleep(10.0)
                     continue
                 except Exception:
-                    failed.add((sym, interval))  # bad/delisted symbol
+                    # bad/delisted symbol or transient network error:
+                    # exclude from THIS sweep + record globally so the
+                    # 30-min window keeps the next sweep from re-burning
+                    # the same weight immediately.
+                    round_failed.add((sym, interval))
+                    with self._lock:
+                        self._seed_failed[key] = time.monotonic()
                     continue
                 time.sleep(max(0.05, settings.WS_SEED_DELAY_S))
             if total_seeded:
@@ -522,6 +606,87 @@ class WSKlineFeed:
             if all(self.fresh(s, min_bars=60, interval=iv) for iv in ivs))
         return covered / len(syms)
 
+    def servable_coverage(self, min_bars: Optional[int] = None) -> float:
+        """v5.24: fraction of the universe the analyzer can ACTUALLY serve.
+
+        A symbol counts only when EVERY subscribed interval holds at least
+        `min_bars` bars (default CANDLE_LIMIT - the depth get_cached()
+        demands before serving) AND its series is fresh (WS TTL). The old
+        gate metric coverage() used a 60-bar floor while consumers ask for
+        CANDLE_LIMIT: it said "go" for a cache that served nothing, so
+        degraded cycles analyzed zero symbols (production 2026-10-01:
+        coverage_pct 90+ was reported as 0.0/ruled-out while the real cache
+        could not serve one single symbol).
+        """
+        if not settings.USE_WS_FEED or not self._started:
+            return 0.0
+        need = max(1, int(min_bars or settings.CANDLE_LIMIT))
+        syms = [s.upper().strip() for s in self._universe if s]
+        ivs = self._intervals()
+        if not syms or not ivs:
+            return 0.0
+        now = time.monotonic()
+        ttl = settings.WS_FRESH_TTL_MIN * 60.0
+        covered = 0
+        with self._lock:
+            for s in syms:
+                ok = True
+                for iv in ivs:
+                    key = self._key(s, iv)
+                    bars = self._bars.get(key)
+                    if not bars or len(bars) < need:
+                        ok = False
+                        break
+                    if (now - self._last_event.get(key, 0.0)) > ttl:
+                        ok = False
+                        break
+                if ok:
+                    covered += 1
+        return covered / len(syms)
+
+    def cache_status(self) -> Dict:
+        """v5.24: seeder-perspective snapshot for the gate + dashboard.
+
+        Answers the only question that matters when the bot looks idle:
+        HOW FAR is the cache from serving a cycle, and is the seeder on it?
+        """
+        now = time.monotonic()
+        retry_after = max(60.0, float(getattr(
+            settings, "WS_SEED_RETRY_AFTER_S", 1800)))
+        deep_min = max(1, int(settings.CANDLE_LIMIT))
+        with self._lock:
+            universe = list(self._universe)
+            ivs = list(self._intervals())
+            failed_recent = sum(
+                1 for ts in self._seed_failed.values()
+                if (now - ts) <= retry_after)
+            short = len(self._seed_short)
+            bars = self._bars
+        missing = shallow = 0
+        for s in universe:
+            s = s.upper().strip()
+            if not s:
+                continue
+            for iv in ivs:
+                key = self._key(s, iv)
+                b = bars.get(key)
+                n = len(b) if b else 0
+                if n == 0:
+                    missing += 1
+                elif n < deep_min:
+                    shallow += 1
+        n_syms = max(1, len(universe))
+        return {
+            "universe_symbols": len(universe),
+            "missing_keys": missing,       # no cache at all
+            "shallow_keys": shallow,       # exists but below CANDLE_LIMIT
+            "pending_keys": missing + shallow,  # seeder work queue
+            "failed_recent": failed_recent,     # excluded (retry window)
+            "short_history": short,             # new-listing keys
+            "servable_symbols": round(self.servable_coverage() * n_syms),
+            "seeding": self._seed_busy,
+        }
+
     def get_cached(self, symbol: str, limit: int = 200,
                    interval: str = "1h", allow_stale: bool = False,
                    max_age_s: Optional[float] = None):
@@ -592,6 +757,9 @@ class WSKlineFeed:
             "prices_fresh": fresh_prices,
             "coverage_pct": round(self.coverage() * 100, 1),
             "seeding": self._seed_busy,
+            # v5.24: cache-readiness transparency (why a cycle ran/skipped)
+            "servable_pct": round(self.servable_coverage() * 100, 1),
+            "cache_status": self.cache_status(),
         }
 
 

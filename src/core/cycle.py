@@ -499,6 +499,23 @@ def open_new_positions(recommendations: List[Dict]) -> int:
 # ------------------------------------------------------------------
 # FULL CYCLE
 # ------------------------------------------------------------------
+# v5.24: consecutive gate-skips (cooldown-skips + recovery-yields) inside
+# this process. Reset by every "run"/full "degraded" decision; read by the
+# anti-deadlock escape hatches in rate_limit_gate(). Dict (not bare global)
+# so tests can reset it via cycle.reset_gate_state() without `global`.
+_gate_state = {"skips": 0}
+
+
+def gate_skip_streak() -> int:
+    """v5.24: current consecutive-skip count (dashboard transparency)."""
+    return _gate_state["skips"]
+
+
+def reset_gate_state() -> None:
+    """v5.24: test/ops hook - zero the skip streak."""
+    _gate_state["skips"] = 0
+
+
 def rate_limit_gate() -> str:
     """v5.14 three-way gate: "run" | "degraded" | "skip".
 
@@ -509,37 +526,113 @@ def rate_limit_gate() -> str:
                    REST bans do not touch the WS service).
     - "skip"     : cooldown active and the WS cache cannot cover the
                    universe - idle until the next cron tick (old behavior).
+
+    v5.24 anti-deadlock (production 2026-10-01: the shared Render IP ate a
+    732s Retry-After for ONE request, the WS cache sat permanently shallow,
+    and not a single analysis cycle completed after the deploy):
+
+    1. HONEST METRIC - degraded decisions now use servable_coverage()
+       (CANDLE_LIMIT-deep + fresh, what get_cached() actually serves)
+       instead of the old 60-bar coverage() that over-reported readiness.
+
+    2. RECOVERY-WINDOW YIELD - when REST just became available but the WS
+       cache is still shallow, the gate hands the window to the paced
+       seeder (~86 weight-2 fetches) instead of firing the fat REST burst
+       that converts the window into a fresh 429 ban. Bounded by
+       GATE_RECOVERY_SKIP_LIMIT consecutive skips so it can never stall
+       the bot permanently.
+
+    3. ESCAPE HATCH - after GATE_ESCAPE_SKIP_MIN consecutive skipped ticks
+       during a cooldown, run a PARTIAL WS-only cycle with whatever symbols
+       are servable (>= GATE_MIN_SERVABLE). Analyzing 5 symbols is
+       infinitely better than zero scans for hours; it costs zero REST
+       weight and updates last_run on the dashboard.
     """
     from src.core.rate_limiter import rate_limiter
     remaining = rate_limiter.cooldown_remaining()
-    if remaining <= 0:
-        return "run"
+
+    ws_live = False
+    serv = 0.0
+    servable_n = 0
     if settings.USE_WS_FEED:
         try:
             from src.core.ws_feed import ws_feed
-            if ws_feed.is_live():
-                cov = ws_feed.coverage()
-                if cov >= max(0.0, settings.WS_DEGRADED_COVERAGE):
-                    log.warning(
-                        f"[yellow]Rate-limit cooldown active "
-                        f"({remaining:.0f}s left)[/] - [cyan]running WS-only "
-                        f"cycle[/] (coverage {cov:.0%}, zero REST weight - "
-                        f"WebSocket streams bypass the REST ban)"
-                    )
-                    return "degraded"
-                log.warning(
-                    f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left)[/] - "
-                    f"skipping this cycle (WS coverage {cov:.0%} < "
-                    f"{settings.WS_DEGRADED_COVERAGE:.0%}); next cron tick retries"
-                )
-                return "skip"
+            ws_live = ws_feed.is_live()
+            if ws_live:
+                serv = ws_feed.servable_coverage()
+                servable_n = int(round(
+                    serv * max(1, len(getattr(ws_feed, "_universe", [])))))
         except Exception:
-            pass
+            ws_live = False
+
+    # ---- REST allowed ----
+    if remaining <= 0:
+        # v5.24: recovery-window yield - let the seeder deepen the cache
+        # BEFORE any fat REST burst pokes a freshly-banned shared IP.
+        if ws_live and serv < max(0.0, settings.WS_DEGRADED_COVERAGE):
+            try:
+                pending = int(
+                    ws_feed.cache_status().get("pending_keys", 0))
+            except Exception:
+                pending = 0
+            limit = max(1, int(getattr(settings, "GATE_RECOVERY_SKIP_LIMIT", 4)))
+            if 0 < pending < limit * 1000 and \
+                    _gate_state["skips"] < limit:
+                _gate_state["skips"] += 1
+                try:
+                    ws_feed.ensure_seed_worker()
+                except Exception:
+                    pass
+                log.warning(
+                    f"[yellow]Recovery window yielded to the WS seeder[/] - "
+                    f"{pending} cache key(s) shallow/missing "
+                    f"(skips {_gate_state['skips']}/{limit}); a fat REST "
+                    f"burst here would earn a fresh 429 - next tick "
+                    f"re-evaluates")
+                return "skip"
+        if _gate_state["skips"]:
+            log.info("[green]Rate gate[/] - REST available, running normal cycle")
+        _gate_state["skips"] = 0
+        return "run"
+
+    # ---- cooldown active ----
+    if ws_live:
+        if serv >= max(0.0, settings.WS_DEGRADED_COVERAGE):
+            log.warning(
+                f"[yellow]Rate-limit cooldown active "
+                f"({remaining:.0f}s left)[/] - [cyan]running WS-only "
+                f"cycle[/] (servable {serv:.0%}, zero REST weight - "
+                f"WebSocket streams bypass the REST ban)"
+            )
+            _gate_state["skips"] = 0
+            return "degraded"
+        # v5.24 escape hatch: a partial WS-only cycle beats skipping forever
+        if (_gate_state["skips"] >= max(1, int(getattr(
+                settings, "GATE_ESCAPE_SKIP_MIN", 3)))
+                and servable_n >= max(1, int(getattr(
+                    settings, "GATE_MIN_SERVABLE", 1)))):
+            log.warning(
+                f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left)[/] - "
+                f"[cyan]running PARTIAL WS-only cycle[/]: {servable_n} "
+                f"servable symbol(s) off the live cache (skip streak "
+                f"{_gate_state['skips']}) - zero REST weight")
+            # streak intentionally NOT reset: it stays latched for the rest
+            # of this cooldown so every tick analyzes what exists; a full
+            # 'run' or full-coverage 'degraded' clears it.
+            return "degraded"
+        log.warning(
+            f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left)[/] - "
+            f"skipping this cycle (WS servable {serv:.0%} < "
+            f"{settings.WS_DEGRADED_COVERAGE:.0%}); next cron tick retries"
+        )
+        _gate_state["skips"] += 1
+        return "skip"
     log.warning(
         f"[yellow]Rate-limit cooldown active ({remaining:.0f}s left) - "
         f"skipping this cycle (429/418 or shared-IP pressure); "
         f"next cron tick retries automatically[/]"
     )
+    _gate_state["skips"] += 1
     return "skip"
 
 

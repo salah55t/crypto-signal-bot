@@ -250,6 +250,25 @@ class Settings:
     #    that collides with shared-IP pressure).
     WS_SEED_DELAY_S: float = float(os.getenv("WS_SEED_DELAY_S", "0.35"))
 
+    # --- v5.24 scan-resurrection: anti-deadlock knobs ----------------------
+    # Production 2026-10-01: the shared Render IP ate a 732s Retry-After for
+    # ONE request while the WS cache sat shallow, so no cycle ever ran (the
+    # dashboard showed zero runs forever). Three coordinated fixes:
+    # a) A seeder key that FAILED is excluded from re-fetching this long
+    #    (delisted symbols cost no weight, but transient errors must not
+    #    spin the paced worker into a retry storm).
+    WS_SEED_RETRY_AFTER_S: int = int(os.getenv("WS_SEED_RETRY_AFTER_S", "1800"))
+    # b) When REST just became available but the cache is still shallow, the
+    #    gate yields up to this many consecutive ticks to the seeder before
+    #    forcing a normal REST cycle (stall-breaker).
+    GATE_RECOVERY_SKIP_LIMIT: int = int(os.getenv("GATE_RECOVERY_SKIP_LIMIT", "4"))
+    # c) During a cooldown, after this many consecutive skipped ticks, run a
+    #    PARTIAL WS-only cycle with whatever servable symbols exist (needs
+    #    at least GATE_MIN_SERVABLE of them). Zero REST weight, updates
+    #    last_run, and beats "the dashboard shows nothing happened".
+    GATE_ESCAPE_SKIP_MIN: int = int(os.getenv("GATE_ESCAPE_SKIP_MIN", "3"))
+    GATE_MIN_SERVABLE: int = int(os.getenv("GATE_MIN_SERVABLE", "1"))
+
     # --- v5.15 ban-survivor: state that outlives process restarts ---------
     # The dynamic USDT universe is persisted to data/symbols_cache.json after
     # every successful fetch; a restart during a REST 418/429 ban boots from

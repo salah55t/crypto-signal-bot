@@ -96,17 +96,29 @@ class _FakeLim:
 
 
 class _FakeGateFeed:
-    """Stand-in for the ws_feed singleton in cycle-gate tests."""
+    """Stand-in for the ws_feed singleton in cycle-gate tests.
+
+    v5.24: the gate is now SERVABLE-based (CANDLE_LIMIT-deep + fresh =
+    what get_cached() really serves), so the fake exposes the new
+    servable_coverage()/cache_status() contract alongside coverage().
+    """
 
     def __init__(self, live=True, cov=0.95):
         self._live = live
         self._cov = cov
+        self._universe = ["S%d" % i for i in range(43)]
 
     def is_live(self):
         return self._live
 
     def coverage(self, symbols=None, intervals=None):
         return self._cov
+
+    def servable_coverage(self, min_bars=None):
+        return self._cov
+
+    def cache_status(self):
+        return {"pending_keys": 0}
 
 
 @pytest.fixture

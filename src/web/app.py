@@ -175,6 +175,14 @@ async def health():
             rate_state["binance_requests_total"] = int(binance_client.request_count)
         except Exception:
             pass
+        # v5.24: gate transparency - consecutive skipped ticks (cooldown
+        # skips + recovery-window yields) so "the bot looks idle" is
+        # explainable from the dashboard alone.
+        try:
+            from src.core import cycle as _cycle
+            rate_state["gate_skip_streak"] = _cycle.gate_skip_streak()
+        except Exception:
+            pass
     except Exception:
         rate_state = {"error": "unavailable"}
     try:
