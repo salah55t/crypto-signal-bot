@@ -66,6 +66,38 @@ def build_1s(seconds=1000, flat=100.0, slope=0.0, slope_last=0,
 RAMP = dict(slope=0.0015, slope_last=1000)  # passes every checklist gate
 
 
+def build_1s_gap_burst(seconds=1000, flat=100.0,
+                       steps=(0.2, 0.4, 0.8, 1.6, 3.2), aligned_start=True):
+    """v5.27: a fee-SURVIVABLE market fixture. The old RAMP (0.015% per
+    15s candle) is exactly the fee-food the live day proved untradeable:
+    its whole 60s hold moved ~0.06% against a 0.2% round-trip fee. This
+    builder keeps the base flat and prints a parabolic gap-spike over the
+    last len(steps) closed 15s buckets - the only realistic shape that
+    passes BOTH the verbatim near-band rule (BB 11/3) and the fee-linked
+    ATR floor (max(0.25%, fees x 1.25))."""
+    if aligned_start:
+        start = pd.Timestamp.now(tz="UTC").floor("30s") - \
+            pd.Timedelta(seconds=seconds)
+        idx = pd.date_range(start=start, periods=seconds, freq="s",
+                            tz="UTC")
+    else:
+        end = now_utc().replace(microsecond=0)
+        idx = pd.date_range(end=end, periods=seconds, freq="s", tz="UTC")
+    close = np.full(seconds, flat)
+    n = len(steps)
+    for k in range(1, n + 1):
+        # the k-th burst bucket from the end: its first 1s bar carries the gap
+        close[seconds - k * 15:] += steps[n - k]
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    high = np.maximum(open_, close) + 0.0001
+    low = np.minimum(open_, close) - 0.0001
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close,
+         "volume": np.full(seconds, 10.0),
+         "close_time": idx + pd.Timedelta(seconds=1)},
+        index=idx)
+
+
 # ------------------------------------------------------------------
 # Resample math
 # ------------------------------------------------------------------
@@ -120,9 +152,9 @@ def test_tf_fast_30s():
 # ------------------------------------------------------------------
 # The 100% checklist
 # ------------------------------------------------------------------
-def test_checklist_fires_on_clean_ramp(monkeypatch):
+def test_checklist_fires_on_fee_survivable_burst(monkeypatch):
     monkeypatch.setattr(settings, "SCALP_BB_NEAR_PCT", 0.12)
-    sig = MicroScalpStrategy().analyze(build_1s(1000, **RAMP), "TESTUSDT")
+    sig = MicroScalpStrategy().analyze(build_1s_gap_burst(), "TESTUSDT")
     assert sig.direction == "bullish", sig.reasons
     d = sig.details
     assert d["green_run"] >= 3
@@ -131,10 +163,16 @@ def test_checklist_fires_on_clean_ramp(monkeypatch):
     # spot-adaptation ladder: disaster-SL floor and TP2 floor respected
     assert d["sl_pct"] >= settings.SCALP_SL_MIN_PCT - 0.01
     assert d["tp2_pct"] >= settings.SCALP_TP2_MIN_PCT - 0.01
+    # v5.27: TP1 must clear round-trip fees plus the net minimum
+    assert d["tp1_pct"] >= d["fee_rt_pct"] + settings.SCALP_MIN_NET_MOVE_PCT
+    # and the fixture itself must be fee-honest (ATR above the floor)
+    assert d["atr_pct"] >= d["min_atr_floor_pct"]
 
 
 def test_checklist_requires_green_run(monkeypatch):
     monkeypatch.setattr(settings, "SCALP_BB_NEAR_PCT", 99.0)
+    # checklist unit test: fee floors OFF so the failure is the checklist's
+    _fee_floors_off(monkeypatch)
     df = build_1s(1000, **RAMP)
     # turn the LAST CLOSED 15s bucket red (its final 1s bar closes red) -
     # the current bucket is still forming and gets dropped
@@ -153,6 +191,7 @@ def test_checklist_requires_green_run(monkeypatch):
 
 def test_checklist_requires_above_supertrend(monkeypatch):
     monkeypatch.setattr(settings, "SCALP_BB_NEAR_PCT", 99.0)
+    _fee_floors_off(monkeypatch)
     df = build_1s(1000, **RAMP)
     # crash the tail through the SuperTrend line (red candles below it)
     df.iloc[-30:, df.columns.get_loc("close")] *= 0.99
@@ -166,14 +205,42 @@ def test_checklist_requires_above_supertrend(monkeypatch):
 def test_checklist_requires_near_band(monkeypatch):
     # 0.05% nearness vs a ramp whose band distance is ~0.10% -> far
     monkeypatch.setattr(settings, "SCALP_BB_NEAR_PCT", 0.05)
+    _fee_floors_off(monkeypatch)
     sig = MicroScalpStrategy().analyze(build_1s(1000, **RAMP), "TESTUSDT")
     assert sig.direction == "neutral"
     assert any("الحد العلوي" in r for r in sig.reasons)
 
 
-def test_long_only_by_construction():
+def _fee_floors_off(monkeypatch):
+    """Checklist unit tests isolate the checklist from the v5.27 fee
+    floors (RAMP's ATR is below the fee-linked floor by design)."""
+    monkeypatch.setattr(settings, "SCALP_MIN_ATR_PCT", 0.0)
+    monkeypatch.setattr(settings, "SCALP_FEE_COVER_MULT", 0.0)
+
+
+def test_fee_linked_atr_floor_blocks_pinned_market(monkeypatch):
+    """v5.27 THE live-day lesson: a market whose resampled-TF ATR cannot
+    cover the round-trip fee is untradeable on a 60s time exit no matter
+    how clean the checklist looks (6/6 fee losses on day one)."""
+    assert settings.SCALP_FEE_COVER_MULT > 0
+    sig = MicroScalpStrategy().analyze(build_1s(1000, **RAMP), "TESTUSDT")
+    assert sig.direction == "neutral"
+    assert any("fee-food" in r or "fee-linked" in r for r in sig.reasons)
+
+
+def test_fee_floor_scales_with_trading_fee(monkeypatch):
+    """The floor is derived from TRADING_FEE_PCT - doubling the fee
+    schedule doubles the minimum tradeable volatility."""
+    monkeypatch.setattr(settings, "TRADING_FEE_PCT", 0.2)  # 0.4% RT -> 0.5% floor
+    sig = MicroScalpStrategy().analyze(build_1s_gap_burst(), "TESTUSDT")
+    assert sig.direction == "neutral"
+    assert any("fee-linked" in r for r in sig.reasons)
+
+
+def test_long_only_by_construction(monkeypatch):
     """A falling market can never produce a signal - there is no bearish
     branch in the strategy at all (spot, 'عند الصعود فقط')."""
+    _fee_floors_off(monkeypatch)
     sig = MicroScalpStrategy().analyze(
         build_1s(1000, slope=-0.002, slope_last=1000), "TESTUSDT")
     assert sig.direction == "neutral"
@@ -209,7 +276,7 @@ def _fake_fetcher(monkeypatch, df_by_symbol):
 
 def test_scanner_produces_candidate(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "SCALP_BB_NEAR_PCT", 0.12)
-    df = build_1s(1000, **RAMP)
+    df = build_1s_gap_burst()
     calls = _fake_fetcher(monkeypatch, {"TESTUSDT": df})
     scanner = ScalpScanner()
     cands = scanner.scan(symbols=["TESTUSDT"])
