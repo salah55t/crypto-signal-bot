@@ -4,10 +4,19 @@ v5: every outbound request is gated by a weighted sliding-window rate limiter
 (Binance allows 6000 weight/min per IP - and Render egress IPs are SHARED).
 HTTP 429 responses feed `Retry-After` back into the limiter as a global
 cooldown instead of triggering an instant retry storm.
+
+v5.29: POST-BAN PROBE. When a long 429/418 cooldown expires, the first
+request verifies the IP with a weight-1 /time probe before the herd (WS
+seeder + scalp tick + analysis cycle) is released - a still-banned IP
+answers 418 to the tiny probe, the limiter re-arms, and the bulk tick
+aborts cleanly instead of EXTENDING the ban (the documented 598s -> 1892s
+escalation loop). Also: exchangeInfo (weight 20, multi-MB) is cached in
+process for 6h - per-order filter lookups stop paying weight 20 each.
 """
 import hmac
 import hashlib
 import json
+import threading
 import time
 import urllib.parse
 import requests
@@ -29,6 +38,9 @@ _ENDPOINT_WEIGHTS = {
     "/api/v3/order": 1,          # POST place / DELETE cancel
     "/api/v3/order/oco": 1,
 }
+
+# v5.29: the post-ban verification probe is always a weight-1 /time request
+PROBE_WEIGHT = 1.0
 
 
 def _endpoint_weight(path: str, params: Dict[str, Any]) -> float:
@@ -85,6 +97,12 @@ class BinanceClient:
         # v5.14: process-lifetime REST request counter (health endpoint
         # visibility for the WS-first weight reduction).
         self.request_count = 0
+        # v5.29: exchangeInfo cache - weight 20 + a multi-MB payload per
+        # call is pure waste for filter lookups that change ~never.
+        self._xinfo: Optional[Dict[str, Any]] = None
+        self._xinfo_ts = 0.0
+        self._xinfo_lock = threading.Lock()
+        self.XINFO_TTL_S = 6 * 3600.0
         if self.api_key:
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
         log.info(
@@ -93,6 +111,62 @@ class BinanceClient:
             f"Public URL: {self.base_url} | "
             f"Signed URL: {self.signed_url}"
         )
+
+    # ------------------------------------------------------------------
+    # v5.29: post-ban verification probe
+    # ------------------------------------------------------------------
+    def _send_probe(self) -> bool:
+        """One weight-1 /time request to verify a just-expired ban.
+
+        Returns True when the IP answers normally (the limiter's probe
+        requirement is cleared and the caller proceeds). Returns False when
+        the probe was rejected (429/418 - the limiter has already re-armed a
+        cooldown with source probe_reject) or errored - the CALLER raises
+        RateLimitError and its tick aborts cleanly.
+        """
+        try:
+            if not rate_limiter.acquire(PROBE_WEIGHT, timeout=10.0,
+                                        priority=True):
+                rate_limiter.finish_probe(False)
+                return False
+            self.request_count += 1
+            response = self.session.get(
+                f"{self.base_url}/api/v3/time", timeout=10)
+            used = response.headers.get("X-MBX-USED-WEIGHT-1M")
+            if used:
+                rate_limiter.note_server_weight(used)
+            if response.status_code in (429, 418):
+                try:
+                    retry_after = float(response.headers.get("Retry-After", ""))
+                except ValueError:
+                    retry_after = 0.0
+                if response.status_code == 418:
+                    cooldown = min(max(retry_after, 900.0), 86400.0)
+                    rate_limiter.trigger_cooldown(cooldown,
+                                                  source="probe_reject")
+                else:
+                    rate_limiter.trigger_cooldown(
+                        min(retry_after + 2.0 if retry_after > 0 else 30.0,
+                            3600.0), source="429_retry")
+                rate_limiter.finish_probe(False)
+                log.warning(
+                    "[yellow]Post-ban probe REJECTED[/] - Binance "
+                    f"{response.status_code}; re-armed cooldown, the herd "
+                    "stays parked (ban likely EXTENDED - repeat offense)")
+                return False
+            rate_limiter.finish_probe(True)
+            log.info("[green]Post-ban probe OK[/] - IP verified, releasing "
+                     "the queued traffic")
+            return True
+        except RateLimitError:
+            rate_limiter.finish_probe(False)
+            return False
+        except Exception as e:
+            # network error - do NOT release the herd into an unverified IP
+            rate_limiter.finish_probe(False)
+            log.warning(f"[yellow]Post-ban probe errored[/] ({e}) - "
+                        "retrying on the next tick")
+            return False
 
     def _sign(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Sign request params with HMAC-SHA256 (required for private endpoints)."""
@@ -130,6 +204,16 @@ class BinanceClient:
         # v5: reserve request weight BEFORE firing (blocks when the shared
         # IP is near the ceiling; honours 429 cooldowns globally).
         weight = _endpoint_weight(path, params)
+        # v5.29: post-ban probe gate. The first non-priority caller after a
+        # long ban verifies the IP with a weight-1 /time request; while the
+        # probe is pending every other bulk caller fails fast (their ticks
+        # abort cleanly and retry on the next schedule).
+        if not priority and rate_limiter.needs_probe() \
+                and rate_limiter.begin_probe():
+            if not self._send_probe():
+                raise RateLimitError(
+                    "post-ban probe rejected - IP still banned, request aborted"
+                )
         if not rate_limiter.acquire(weight, timeout=90.0, priority=priority):
             raise RateLimitError(
                 f"Rate budget exhausted ({weight}w needed); "
@@ -157,6 +241,7 @@ class BinanceClient:
                     # get multi-hour bans; the old 1h cap made us re-poke and
                     # EXTEND the ban). Cooldown survives restarts (rate_state).
                     cooldown = min(max(retry_after, 900.0), 86400.0)
+                    rate_limiter.trigger_cooldown(cooldown, source="418_ban")
                 else:
                     # v5.12: honor Retry-After FULLY. The old 120s cap made us
                     # poke a still-hot shared IP every 2 minutes, and Binance
@@ -166,12 +251,17 @@ class BinanceClient:
                     if retry_after <= 0:
                         retry_after = 30.0
                     cooldown = min(retry_after + 2.0, 3600.0)
-                rate_limiter.trigger_cooldown(cooldown)
+                    rate_limiter.trigger_cooldown(cooldown, source="429_retry")
                 raise RateLimitError(
                     f"Binance {response.status_code}: {response.text[:120]}"
                 )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            # v5.29: any successful response proves the IP is clean - a
+            # priority caller that slipped past the probe gate clears it.
+            if rate_limiter.probe_pending():
+                rate_limiter.finish_probe(True)
+            return data
         except RateLimitError:
             raise
         except requests.exceptions.HTTPError as e:
@@ -222,9 +312,26 @@ class BinanceClient:
         """Get Binance server time (ms)."""
         return self._get("/api/v3/time").get("serverTime")
 
-    def get_exchange_info(self) -> Dict[str, Any]:
-        """Get exchange info (all symbols, filters, etc.)."""
-        return self._get("/api/v3/exchangeInfo")
+    def get_exchange_info(self, force: bool = False) -> Dict[str, Any]:
+        """Get exchange info (all symbols, filters, etc.).
+
+        v5.29: cached in-process for 6h (weight 20 + multi-MB payload per
+        call; symbol filters change ~never). `force=True` bypasses the
+        cache for callers that genuinely need fresh data.
+        """
+        now = time.time()
+        if (not force and self._xinfo is not None
+                and (now - self._xinfo_ts) < self.XINFO_TTL_S):
+            return self._xinfo
+        with self._xinfo_lock:
+            # double-check inside the lock (thundering boot)
+            if (not force and self._xinfo is not None
+                    and (time.time() - self._xinfo_ts) < self.XINFO_TTL_S):
+                return self._xinfo
+            info = self._get("/api/v3/exchangeInfo")
+            self._xinfo = info
+            self._xinfo_ts = time.time()
+            return info
 
     def get_all_tickers(self) -> List[Dict[str, Any]]:
         """Get 24h ticker stats for all symbols (weight 80 - avoid for prices)."""
@@ -317,7 +424,8 @@ class BinanceClient:
                     retry_after = float(retry_after)
                 except ValueError:
                     retry_after = 30.0
-                rate_limiter.trigger_cooldown(min(retry_after + 2, 120))
+                rate_limiter.trigger_cooldown(min(retry_after + 2, 120),
+                                              source="429_retry")
                 raise RateLimitError(
                     f"Binance {response.status_code}: {response.text[:120]}"
                 )

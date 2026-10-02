@@ -215,6 +215,10 @@ async def health():
     # v5.2: surface rate-limit state so "bot silent" is explainable
     # (shared-IP cooldown vs real outage) straight from the dashboard.
     # v5.3: + WebSocket feed status + pressure streak.
+    # v5.29: + ban source (418_ban/429_retry/header_pressure/restored/
+    # probe_reject) + cooldown episode counter + post-ban probe state -
+    # "rate ban active" is now explainable (neighbor-driven vs our traffic)
+    # without reading container logs.
     try:
         from src.core.rate_limiter import rate_limiter
         rate_state = {
@@ -223,6 +227,9 @@ async def health():
             "used_weight_1m": int(rate_limiter.used_weight()),
             "budget_per_min": int(rate_limiter.budget),
             "pressure_streak": rate_limiter.pressure_streak(),
+            "last_cooldown_source": rate_limiter.last_source(),
+            "cooldowns_armed_total": rate_limiter.armed_total(),
+            "probe_pending": rate_limiter.probe_pending(),
         }
         # v5.14: process-lifetime REST request count - the WS-first pipeline
         # should keep this growing far slower than before.
