@@ -62,12 +62,22 @@ class SignalScorer:
     DIRECTION_THRESHOLD = 8.0
 
     def __init__(self):
-        # Original calibrated trio
-        self.strategies = [
-            TrendPullbackStrategy(weight=2.0),                # buy strength on pullbacks
-            LiquiditySweepReversalStrategy(weight=2.0),       # join stop hunts reversal
-            VolatilityBreakoutStrategy(weight=1.8),           # squeeze breakout with volume
-        ]
+        # v5.28: every composite is settings-gated now. The defaults are
+        # EVIDENCE-BASED (scripts/research/ baseline on 39 top-volume pairs
+        # x ~500 days of real 4h data, production exit lifecycle, 0.24%
+        # round-trip costs, 4 time-folds):
+        #   volatility_breakout  +18.9 bps/trade, PF 1.58, all folds > 0 -> ON
+        #   trend_pullback       -0.5 bps/trade, PF 0.99, folds mixed -> OFF
+        #   liquidity_sweep      -6.9 bps/trade, PF 0.81, ALL folds < 0 -> OFF
+        #   triple_confluence    +6.9 bps, macd_breakout +9.5, bb_mean_rev
+        #                        +6.4 (thin but positive) -> ON (v5.7 flags)
+        self.strategies = []
+        if settings.STRATEGY_TREND_PULLBACK_ENABLED:
+            self.strategies.append(TrendPullbackStrategy(weight=2.0))
+        if settings.STRATEGY_LIQUIDITY_SWEEP_ENABLED:
+            self.strategies.append(LiquiditySweepReversalStrategy(weight=2.0))
+        if settings.STRATEGY_VOL_BREAKOUT_ENABLED:
+            self.strategies.append(VolatilityBreakoutStrategy(weight=1.8))
         # v5.7 Signal Stack trio (user-specified, settings-gated)
         if settings.STRATEGY_TRIPLE_TREND_ENABLED:
             self.strategies.append(TripleConfluenceTrendStrategy(

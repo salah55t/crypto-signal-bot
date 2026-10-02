@@ -350,6 +350,49 @@ class RiskManager:
                         "no counter-tape scalp longs")
         return (True, "")
 
+    def _trend_channel_ok(self, symbol: str) -> Tuple[bool, str]:
+        """v5.28: clustering + tape caps for the trend-boost channel.
+
+        Same three protections as bottom/momentum/scalp, sized for a 4h
+        swing channel whose failure mode is stacking correlated breakout
+        longs on one tape:
+          1. max concurrent open trend positions
+          2. minimum spacing since the newest trend entry
+          3. optional bearish-1h-BTC tide gate (default OFF: research
+             showed tide-filtering the Donchian entry LOWERED expectancy
+             +28.3 -> +21.5 bps by delaying entries into recoveries; the
+             global market-tide gate still applies to every entry)
+        """
+        trends = [p for p in self.open_positions
+                  if p.get("boosted_from_trend")]
+        cap = int(settings.TREND_MAX_OPEN_CONCURRENT)
+        if len(trends) >= cap:
+            return (False,
+                    f"trend concurrent cap ({len(trends)}/{cap} open)")
+        last_ts = None
+        for p in trends:
+            try:
+                t = datetime.fromisoformat(str(p.get("entry_time")))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if last_ts is None or t > last_ts:
+                    last_ts = t
+            except Exception:
+                continue
+        if last_ts is not None:
+            gap_min = (now_utc() - last_ts).total_seconds() / 60.0
+            if gap_min < settings.TREND_ENTRY_SPACING_MIN:
+                return (False,
+                        f"trend entry spacing ({gap_min:.0f}min < "
+                        f"{settings.TREND_ENTRY_SPACING_MIN:.0f}min)")
+        if settings.TREND_BTC_TIDE_GATE:
+            regime, _score = self._tide_snapshot()
+            if regime == "bearish":
+                return (False,
+                        "trend tide gate (BTC 1h regime bearish) - "
+                        "no counter-tape trend longs")
+        return (True, "")
+
     def position_size_notional(self, entry_price: float,
                                 stop_loss: float) -> float:
         """
@@ -486,7 +529,8 @@ class RiskManager:
         # same binary checklist on true 15s/30s candles.
         if (not (rec.get("boosted_from_bottom")
                  or rec.get("boosted_from_momentum")
-                 or rec.get("boosted_from_scalp"))
+                 or rec.get("boosted_from_scalp")
+                 or rec.get("boosted_from_trend"))
                 and float(rec.get("harmony", 0.0)) < settings.MIN_HARMONY):
             reasons.append(
                 f"Harmony too low ({rec.get('harmony', 0.0):.2f} "
@@ -536,6 +580,11 @@ class RiskManager:
             _sok, _swhy = self._scalp_channel_ok(rec.get("symbol", ""))
             if not _sok:
                 return {"status": "rejected", "reasons": [_swhy]}
+        # v5.28: trend-channel clustering + tape caps (both paths)
+        if rec.get("boosted_from_trend"):
+            _tok, _twhy = self._trend_channel_ok(rec.get("symbol", ""))
+            if not _tok:
+                return {"status": "rejected", "reasons": [_twhy]}
 
         entry = rec["current_price"]
         sl = rec["stop_loss"]
@@ -605,6 +654,7 @@ class RiskManager:
             "boosted_from_bottom": bool(rec.get("boosted_from_bottom")),
             "boosted_from_momentum": bool(rec.get("boosted_from_momentum")),
             "boosted_from_scalp": bool(rec.get("boosted_from_scalp")),
+            "boosted_from_trend": bool(rec.get("boosted_from_trend")),
         }
         self.open_positions.append(position)
         save_json(self.open_positions, POSITIONS_FILE)
@@ -674,6 +724,11 @@ class RiskManager:
             _sok, _swhy = self._scalp_channel_ok(rec.get("symbol", ""))
             if not _sok:
                 return {"status": "rejected", "reasons": [_swhy]}
+        # v5.28: trend-channel clustering + tape caps (both paths)
+        if rec.get("boosted_from_trend"):
+            _tok, _twhy = self._trend_channel_ok(rec.get("symbol", ""))
+            if not _tok:
+                return {"status": "rejected", "reasons": [_twhy]}
 
         symbol = rec["symbol"]
         entry = rec["current_price"]

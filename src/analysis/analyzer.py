@@ -168,6 +168,67 @@ def build_double_ind_rec(c: Dict) -> Dict:
     }
 
 
+def build_trend_rec(c: Dict) -> Dict:
+    """v5.28: convert a trend-scanner candidate (donchian/st_flip) into a
+    recommendation dict.
+
+    Admission is the candidate's own research score (TREND_MIN_SCORE=62)
+    mapped onto the boost confidence scale, capped at TREND_CONF_CAP=72 so
+    genuine strategy signals still rank first (same contract as the bottom
+    channel). The SL/TP1/TP2 geometry is the research-validated one:
+    SL 2.0xATR / TP1 2.4xATR / TP2 4.8xATR - TP2 RR 2.4 clears
+    MIN_RR_RATIO by construction.
+
+    boosted_from_trend=True exempts the rec from the strategy-scale
+    MIN_HARMONY gate and activates the channel caps in the risk manager
+    (_trend_channel_ok).
+    """
+    score = float(c.get("score", 0))
+    confidence = max(0.0, min(score, settings.TREND_CONF_CAP))
+    n_layers = len(c.get("signals") or [])
+    harmony = round(min(0.85, 0.35 + 0.10 * max(0, n_layers - 1)), 2)
+    price = float(c["current_price"])
+    tp2 = float(c.get("take_profit_2") or c.get("take_profit"))
+    return {
+        "symbol": c["symbol"],
+        "direction": "bullish",  # LONG-ONLY: spot channel
+        "weighted_score": score,
+        "confidence": confidence,
+        "admission_confidence": confidence,
+        "current_price": price,
+        # Expected move = the runner target (TP2 = 4.8 ATR); its % floor
+        # (1.0%) keeps this above MIN_EXPECTED_RISE by construction.
+        "expected_rise_pct": max(
+            settings.MIN_EXPECTED_RISE,
+            abs(tp2 - price) / max(price, 1e-12) * 100.0),
+        "stop_loss": c["stop_loss"],
+        "take_profit": c["take_profit"],
+        "take_profit_2": tp2,
+        "risk_reward_ratio": float(c.get("risk_reward_ratio", 0.0)),
+        "atr": float(c.get("atr") or 0.0),
+        "atr_pct": float(c.get("atr_pct") or 0.0),
+        "harmony": harmony,
+        # Breakouts/flips enter at market - no limit zone to chase.
+        "entry_type": "market",
+        "signals": [{
+            "strategy": c.get("source", "trend_boost"),
+            "direction": "bullish",
+            "score": score,
+            "confidence": confidence / 100.0,
+            "reasons": c.get("signals", []),
+            "details": {
+                "timeframe": c.get("timeframe"),
+                "volume_ratio": c.get("volume_ratio"),
+                "above_ema200": c.get("above_ema200"),
+                "atr": c.get("atr"),
+            },
+        }],
+        "timeframe": c.get("timeframe", settings.TIMEFRAMES[0]),
+        "analyzed_at": c.get("analyzed_at"),
+        "boosted_from_trend": True,
+    }
+
+
 class MarketAnalyzer:
     """Top-level orchestrator: fetch -> analyze -> score -> filter."""
 
@@ -655,6 +716,77 @@ class MarketAnalyzer:
             pass
         except Exception as e:
             log.error(f"Momentum scanner boost failed: {e}")
+
+        # === v5.28 EVIDENCE-BASED TREND BOOST (strategy replacement) ====
+        # Two long-only 4h entry families selected by the research harness
+        # (scripts/research/: 40 pairs x ~500 days, production exit
+        # lifecycle, honest 0.24% round-trip costs, 4 time-folds):
+        # donchian_break (+28.3 bps/trade, PF 1.98, all folds positive)
+        # and st_flip (+14.7 bps/trade, PF 1.50, all folds positive) -
+        # replacing the starved composite stack whose signals died in the
+        # confidence formula (see README v5.28). Same boost contract as
+        # bottom/momentum: own admission score, session gate, per-cycle
+        # cap, channel caps in the risk manager, then re-rank.
+        trend_boosted = 0
+        try:
+            if not settings.TREND_BOOST_ENABLED:
+                log.info("[cyan]Trend channel disabled[/] "
+                         "(TREND_BOOST_ENABLED=false)")
+                raise StopIteration  # skip the whole block cleanly
+            from src.analysis.trend_scanner import trend_scanner
+            trend_candidates = trend_scanner.scan(
+                max_candidates=max(settings.TREND_MAX_PER_CYCLE * 3, 5))
+            strong_trend = [
+                c for c in trend_candidates
+                if c.get("score", 0) >= settings.TREND_MIN_SCORE
+                and c.get("risk_reward_ratio", 0) >= settings.MIN_RR_RATIO
+            ]
+            if strong_trend:
+                log.info(
+                    f"[green]{len(strong_trend)} trend candidate(s)[/] "
+                    f"(Donchian {settings.TREND_DONCHIAN_PERIOD} + "
+                    f"SuperTrend {settings.TREND_ST_PERIOD}/"
+                    f"{settings.TREND_ST_MULT:g})")
+            existing_symbols = {r.get("symbol") for r in filtered}
+            for c in strong_trend:
+                if trend_boosted >= settings.TREND_MAX_PER_CYCLE:
+                    break
+                if c["symbol"] in existing_symbols:
+                    continue
+                # v5.18 pattern: the session clock gates this channel too
+                try:
+                    from src.analysis.session_clock import entry_gate, \
+                        session_info
+                    _blocked, _why = entry_gate(
+                        session_info(), c.get("source", "trend_boost"),
+                        False)
+                    if _blocked:
+                        log.info(
+                            f"[yellow]Trend boost blocked[/] "
+                            f"{c['symbol']}: {_why}")
+                        continue
+                except Exception:
+                    pass
+                rec = build_trend_rec(c)
+                filtered.append(rec)
+                existing_symbols.add(c["symbol"])
+                trend_boosted += 1
+            if trend_boosted:
+                log.info(
+                    f"[green]{trend_boosted} trend rec(s) boosted into "
+                    f"recommendations[/]")
+                filtered.sort(
+                    key=lambda r: (
+                        r.get("confidence", 0)
+                        + 5.0 * min(r.get("risk_reward_ratio", 0), 3.0) / 3.0
+                        + 4.0 * min(r.get("harmony", 0.0), 1.0)
+                    ),
+                    reverse=True,
+                )
+        except StopIteration:
+            pass
+        except Exception as e:
+            log.error(f"Trend scanner boost failed: {e}")
 
         # Limit
         # v5.13: Regime Router - re-rank the merged candidate list by how
