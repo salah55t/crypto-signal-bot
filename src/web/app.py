@@ -230,6 +230,12 @@ async def health():
             "last_cooldown_source": rate_limiter.last_source(),
             "cooldowns_armed_total": rate_limiter.armed_total(),
             "probe_pending": rate_limiter.probe_pending(),
+            # v5.32: consecutive probe rejections - the backoff depth. A
+            # rising number means the shared IP keeps answering 418 to the
+            # weight-1 verification probe, and we now wait Retry-After +
+            # a growing margin (300s x2 each, cap 3600s) before the next
+            # probe instead of poking at the exact expiry (repeat offense).
+            "probe_reject_streak": rate_limiter.probe_reject_streak(),
         }
         # v5.14: process-lifetime REST request count - the WS-first pipeline
         # should keep this growing far slower than before.
