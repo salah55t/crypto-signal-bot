@@ -32,6 +32,12 @@ class Settings:
     # Separate URL for signed endpoints (place orders, account info) - must be api.binance.com
     # If you live in US/UK and need live trading, you'll need to use Binance Testnet or a VPN
     BINANCE_SIGNED_URL: str = os.getenv("BINANCE_SIGNED_URL", "https://api.binance.com")
+    # v5.30: optional REST egress proxy - the structural escape hatch from
+    # shared-IP 418 ban cycles (Render free-tier egress IPs are shared with
+    # other services' traffic; the herd alone can keep the IP banned).
+    # Point it at a proxy with a DEDICATED IP (squid/tinyproxy on a cheap
+    # VPS). Empty = direct connection (default). WS feed is unaffected.
+    BINANCE_PROXY_URL: str = os.getenv("BINANCE_PROXY_URL", "")
     BINANCE_TESTNET: bool = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
     USE_PUBLIC_ONLY: bool = not BINANCE_API_KEY or not BINANCE_API_SECRET
 

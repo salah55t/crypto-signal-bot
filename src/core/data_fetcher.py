@@ -320,9 +320,18 @@ class DataFetcher:
             missing = list(dict.fromkeys(symbols))
         # 2) REST only for the gaps (weight 2-4 per batched request)
         if missing:
-            if rate_limiter.cooldown_remaining() > 0.0:
+            if rate_limiter.cooldown_remaining() > 0.0 \
+                    or rate_limiter.needs_probe():
                 # v5.23: a ban dooms every REST call - return what WS served
                 # and let the caller's last-known fallback fill the gaps.
+                # v5.30: the PROBE WINDOW (cooldown expired, IP not yet
+                # verified) is also no-REST. Priority callers bypass the
+                # probe gate inside the client, so without this guard a
+                # dashboard poll or a position-watch gap-fill would send
+                # real requests into a still-418 IP and EXTEND the ban
+                # (the repeat-offense loop: probe 2701s -> poke -> extend).
+                # WS streams keep flowing during REST bans, so position
+                # watch / dashboard P&L stay live; last-known covers gaps.
                 return out
             for sym, t in DataFetcher.get_batch_tickers(
                     missing, priority=priority).items():

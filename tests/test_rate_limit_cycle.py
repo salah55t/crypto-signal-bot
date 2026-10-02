@@ -15,6 +15,33 @@ import pytest
 from src.core.rate_limiter import WeightedRateLimiter, RateLimitError, rate_limiter
 
 
+# v5.30: the 418/429 tests below drive the REAL client path, which arms
+# `_probe_required` (v5.29 probe gate) and cooldown state on the SHARED
+# singleton. monkeypatching only `_cooldown_until` leaks the probe flag
+# into later test files - latent since v5.29, and behavior-visible once
+# v5.30 taught get_batch_prices to skip REST during the probe window
+# (v5.10 batch-price tests silently got {} instead of REST data).
+@pytest.fixture(autouse=True)
+def _isolate_shared_limiter():
+    """Snapshot & restore the shared limiter singleton around every test."""
+    rl = rate_limiter
+    snap = {
+        "_cooldown_until": rl._cooldown_until,
+        "_probe_required": rl._probe_required,
+        "_probe_claimed": rl._probe_claimed,
+        "_last_source": rl._last_source,
+        "_armed_total": rl._armed_total,
+        "_pressure_streak": rl._pressure_streak,
+        "_last_pressure_ts": rl._last_pressure_ts,
+    }
+    snap_events = list(rl._events)
+    yield
+    for key, val in snap.items():
+        setattr(rl, key, val)
+    rl._events.clear()
+    rl._events.extend(snap_events)
+
+
 # ---------- limiter primitives ----------
 
 def test_cooldown_remaining_zero_when_clear():

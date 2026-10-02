@@ -94,6 +94,20 @@ class BinanceClient:
         self.api_key = settings.BINANCE_API_KEY
         self.api_secret = settings.BINANCE_API_SECRET
         self.session = requests.Session()
+        # v5.30: optional egress escape hatch. Render free-tier egress IPs
+        # are SHARED with other services' traffic ("the herd") - when the
+        # herd alone keeps triggering 418 bans, routing REST through a
+        # private proxy with a dedicated IP (tinyproxy/squid on a cheap
+        # VPS, BINANCE_PROXY_URL) ends the ban cycle permanently. Empty
+        # default = direct connection; the WS feed is unaffected either way.
+        proxy_url = getattr(settings, "BINANCE_PROXY_URL", "")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
+            # never log the URL (may embed credentials) - state its presence
+            log.info(
+                f"[cyan]BinanceClient[/] REST egress routed via proxy "
+                f"({proxy_url.split('://', 1)[0]} scheme, dedicated IP)"
+            )
         # v5.14: process-lifetime REST request counter (health endpoint
         # visibility for the WS-first weight reduction).
         self.request_count = 0
