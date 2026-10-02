@@ -835,6 +835,37 @@ async function fetchAll() {
 }
 
 // ============================================================
+// v5.26: Control-plane auth — POST endpoints require DASHBOARD_API_TOKEN
+// (sent as X-Auth-Token). Token is prompted once and cached in
+// localStorage; a 401 clears it and prompts again.
+// ============================================================
+function getApiToken() {
+  return localStorage.getItem('dashboard_api_token') || '';
+}
+
+function promptForToken(message) {
+  const t = prompt(message || 'أدخل توكن لوحة التحكم (DASHBOARD_API_TOKEN):');
+  if (t && t.trim()) localStorage.setItem('dashboard_api_token', t.trim());
+  return getApiToken();
+}
+
+async function apiPost(url) {
+  let token = getApiToken();
+  if (!token) token = promptForToken();
+  const send = (tok) => fetch(url, {
+    method: 'POST',
+    headers: tok ? { 'X-Auth-Token': tok } : {},
+  });
+  let res = await send(token);
+  if (res.status === 401) {
+    localStorage.removeItem('dashboard_api_token');
+    token = promptForToken('التوكن غير صالح. أدخل DASHBOARD_API_TOKEN الصحيح:');
+    if (token) res = await send(token);
+  }
+  return res;
+}
+
+// ============================================================
 // Run analysis button
 // ============================================================
 $runNowBtn.addEventListener('click', async () => {
@@ -844,7 +875,7 @@ $runNowBtn.addEventListener('click', async () => {
   $runNowBtn.textContent = '⏳ جاري التحليل...';
   showToast('بدأ التحليل. قد يستغرق 1-2 دقيقة.', 'info');
   try {
-    const res = await fetch('/api/run-analysis', { method: 'POST' });
+    const res = await apiPost('/api/run-analysis');
     const data = await res.json();
     if (data.status === 'started') {
       showToast('✅ بدأت دورة التحليل. تحديث تلقائي خلال 30 ثانية.', 'success', 5000);
@@ -890,7 +921,7 @@ $scanBottomsBtn?.addEventListener('click', async () => {
   $scanBottomsBtn.textContent = '⏳ جاري الفحص...';
   showToast('بدأ فحص القاع. قد يستغرق 1-2 دقيقة.', 'info');
   try {
-    const res = await fetch('/api/scan-bottoms', { method: 'POST' });
+    const res = await apiPost('/api/scan-bottoms');
     const data = await res.json();
     if (data.status === 'started') {
       showToast('✅ بدأ فحص القاع. تحديث تلقائي خلال 30 ثانية.', 'success', 5000);
@@ -931,7 +962,7 @@ $confirmResetBtn.addEventListener('click', async () => {
   $confirmResetBtn.innerHTML = '⏳ جاري التصفير...';
   showToast('بدأ تصفير المحفوظات...', 'info');
   try {
-    const res = await fetch('/api/reset-history', { method: 'POST' });
+    const res = await apiPost('/api/reset-history');
     const data = await res.json();
     if (data.status === 'success') {
       showToast('✅ تم تصفير كل المحفوظات بنجاح!', 'success', 5000);

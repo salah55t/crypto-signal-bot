@@ -14,12 +14,13 @@ Locally:
   uvicorn src.web.app:app --reload --port 8080
 """
 import os
+import hmac
 import asyncio
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,13 +64,29 @@ app = FastAPI(
     version="1.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# v5.26: CORS lockdown. The old wildcard-origins + allow_credentials=True
+# pair is INVALID per the CORS spec (browsers reject it) and exposed the
+# control plane to any origin. The dashboard is same-origin and needs no
+# CORS at all; credentialed cross-origin access is opt-in via env.
+_cors_origins = [o.strip() for o in (settings.CORS_ALLOWED_ORIGINS or "").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    # Credentialless wildcard: external READ clients (GET/OPTIONS) keep
+    # working; state-changing POSTs are same-origin or token-carrying only.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
 # Mount static dashboard
 if DASHBOARD_DIR.exists():
@@ -112,6 +129,45 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+# ============================================================
+# v5.26: Control-plane auth (POST endpoints)
+# ============================================================
+def _auth_error(request: Request) -> Optional[JSONResponse]:
+    """Gate for state-changing POST endpoints (/api/run-analysis,
+    /api/scan-bottoms, /api/reset-history).
+
+    The dashboard is PUBLIC on *.onrender.com: anyone could previously wipe
+    the whole trade history or consume the scarce REST weight budget the
+    entire architecture protects. Fails CLOSED:
+      - DASHBOARD_API_TOKEN unset  -> 403 (endpoints disabled, explicit msg)
+      - token mismatch             -> 401 (constant-time compare)
+    Send `Authorization: Bearer <token>` or `X-Auth-Token: <token>`.
+    """
+    expected = (getattr(settings, "DASHBOARD_API_TOKEN", "") or "").strip()
+    if not expected:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": (
+                "Control-plane endpoints are DISABLED: DASHBOARD_API_TOKEN "
+                "is not configured in the environment. Set it to enable "
+                "/api/run-analysis, /api/scan-bottoms and /api/reset-history."
+            )},
+        )
+    supplied = request.headers.get("X-Auth-Token") or ""
+    auth_header = request.headers.get("Authorization") or ""
+    if auth_header.startswith("Bearer "):
+        supplied = supplied or auth_header[len("Bearer "):]
+    if not supplied or not hmac.compare_digest(supplied.strip(), expected):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": (
+                "Unauthorized: missing or invalid token. Send header "
+                "'Authorization: Bearer <DASHBOARD_API_TOKEN>'."
+            )},
+        )
+    return None
 
 
 # ============================================================
@@ -499,8 +555,11 @@ async def get_public_config():
 
 
 @app.post("/api/scan-bottoms")
-async def scan_bottoms_now():
+async def scan_bottoms_now(request: Request):
     """Trigger an immediate bottom scan in background."""
+    auth_err = _auth_error(request)
+    if auth_err is not None:
+        return auth_err
     import threading
     log.info("[cyan]Manual bottom scan trigger received[/]")
 
@@ -526,12 +585,15 @@ async def get_stats():
 
 
 @app.post("/api/run-analysis")
-async def run_analysis_now():
+async def run_analysis_now(request: Request):
     """
     Trigger an immediate bot analysis cycle.
     Returns immediately with a job ID; the analysis runs in background.
     Frontend polls /api/recommendations to see results.
     """
+    auth_err = _auth_error(request)
+    if auth_err is not None:
+        return auth_err
     import threading
     log.info("[cyan]Manual analysis trigger received[/]")
     # Run in background to not block the request
@@ -632,8 +694,11 @@ async def get_bottoms_history(limit: int = 50, min_score: float = 50):
 
 
 @app.post("/api/reset-history")
-async def reset_history():
+async def reset_history(request: Request):
     """Reset ALL bot history (database tables + JSON files). Use with caution."""
+    auth_err = _auth_error(request)
+    if auth_err is not None:
+        return auth_err
     try:
         from src.db.database import db
         from src.risk.manager import risk_manager
@@ -647,7 +712,10 @@ async def reset_history():
             if file_path.exists():
                 file_path.unlink()
         # Reset in-memory state
-        risk_manager.open_positions = []
+        # v5.26: locked clear (the old direct list assignment raced every
+        # other thread AND left daily_stats/loss-streak alive in RAM, so the
+        # next save_json resurrected the pre-reset stats from memory).
+        risk_manager.clear_all_state()
         from src.utils.helpers import save_json
         save_json([], POSITIONS_FILE)
         save_json({}, STATS_FILE)
@@ -752,6 +820,12 @@ def scalp_scan_sync():
         log.debug(f"Scalp scan error: {e}")
 
 
+# v5.26: module-global handle so the shutdown event can actually stop the
+# scheduler (it used to be a function-local variable - shutdown() was
+# never reachable, so jobs kept firing mid-redeploy).
+_scheduler = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on app startup."""
@@ -788,6 +862,8 @@ async def startup_event():
             id="analyze",
             name="market_analysis",
             misfire_grace_time=300,
+            max_instances=1,   # v5.26: never overlap analysis cycles
+            coalesce=True,     # collapse missed runs into one
         )
         # NEW: Fast position monitor - runs every 1 minute
         # Applies SAME logic (SL/TP check) to paper AND live positions
@@ -815,6 +891,7 @@ async def startup_event():
                 f"{max(1, settings.SCALP_SCAN_EVERY_MIN)} min, hold fixed "
                 f"{settings.SCALP_HOLD_SECONDS}s")
         scheduler.start()
+        globals()["_scheduler"] = scheduler
         log.info(f"[green]Scheduler started[/] - analysis: '{settings.SCHEDULE_CRON}', monitor: every 1 min")
 
         # Optionally run an initial cycle on startup
@@ -829,7 +906,26 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """v5.26: REAL graceful shutdown. uvicorn translates SIGTERM (Render
+    redeploy / docker stop) into shutdown events, but nothing was ever
+    stopped here: the APScheduler kept launching analysis cycles and the
+    WS feed kept its threads alive while the process was dying - a cycle
+    killed mid-write is exactly the corruption the atomic save_json now
+    contains. Stop the jobs first, then the feed."""
     log.info("[yellow]Shutting down app[/]")
+    sched = globals().get("_scheduler")
+    if sched is not None:
+        try:
+            sched.shutdown(wait=False)
+            log.info("[yellow]Scheduler stopped[/]")
+        except Exception:
+            pass
+    try:
+        from src.core.ws_feed import ws_feed
+        ws_feed.stop()
+        log.info("[yellow]WS feed stopped[/]")
+    except Exception:
+        pass
 
 
 # ============================================================

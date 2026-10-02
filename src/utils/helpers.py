@@ -1,5 +1,6 @@
 """Helper utilities."""
 import json
+import os
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -73,10 +74,39 @@ def to_json_safe(obj: Any) -> Any:
 
 
 def save_json(data: Any, path: Path) -> None:
-    """Save data as JSON to a file (creates parent dirs)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(to_json_safe(data), f, ensure_ascii=False, indent=2, default=str)
+    """Save data as JSON to a file (creates parent dirs).
+
+    v5.26: ATOMIC write. The payload is serialized to a unique temp file
+    (pid + thread id) and then os.replace'd into place. The old plain
+    open(w) + json.dump could be killed mid-write by a Render SIGTERM
+    (no graceful shutdown existed), corrupting exactly the most critical
+    state file (open_positions.json) which load_json then silently
+    degraded to its default. The temp-file name is per-thread, so
+    concurrent writers to the same path can never clobber each other's
+    temp file; the last os.replace wins atomically.
+    """
+    tmp = None
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            to_json_safe(data), ensure_ascii=False, indent=2, default=str)
+        tmp = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)  # atomic on POSIX and Windows
+        tmp = None  # replaced successfully - nothing to clean up
+    except Exception as e:
+        log.error(f"save_json failed for {path}: {e}")
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def load_json(path: Path, default: Any = None) -> Any:
