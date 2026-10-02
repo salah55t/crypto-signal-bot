@@ -18,6 +18,7 @@ import hashlib
 import json
 import threading
 import time
+from collections import deque
 import urllib.parse
 import requests
 from typing import Dict, Any, Optional, List
@@ -117,6 +118,12 @@ class BinanceClient:
         self._xinfo_ts = 0.0
         self._xinfo_lock = threading.Lock()
         self.XINFO_TTL_S = 6 * 3600.0
+        # v5.31: per-path REST spend ledger (every request that consumed
+        # budget). /api/health exposes the trailing hour so a path that
+        # keeps spending is by definition the next ban-risk to fix.
+        self._spend: deque = deque()
+        self._spend_lock = threading.Lock()
+        self._SPEND_CAP = 4000  # bound memory; an hour is a few hundred
         if self.api_key:
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
         log.info(
@@ -234,6 +241,10 @@ class BinanceClient:
                 "request aborted to avoid a 429 ban"
             )
         self.request_count += 1  # v5.14: only requests that consumed budget
+        with self._spend_lock:
+            self._spend.append((time.monotonic(), path, float(weight)))
+            while len(self._spend) > self._SPEND_CAP:
+                self._spend.popleft()
 
         try:
             response = self.session.get(url, params=params, timeout=15)
@@ -284,6 +295,37 @@ class BinanceClient:
         except requests.exceptions.RequestException as e:
             log.error(f"Binance API request error: {e}")
             raise
+
+    def rest_spend(self, window_s: float = 3600.0) -> Dict[str, Any]:
+        """v5.31: per-endpoint REST spend over the trailing window.
+
+        /api/health visibility for the WS-first weight reduction: after
+        v5.31 the steady-state spend should sit near zero, so any path
+        that keeps reappearing here is by definition the next ban-risk
+        to convert to the WS cache. Weight is the limiter budget actual
+        requests consumed (pre-fire accounting, so aborted-by-4xx calls
+        still show - they cost the same shared-IP goodwill).
+        """
+        horizon = time.monotonic() - max(1.0, float(window_s))
+        with self._spend_lock:
+            events = [e for e in self._spend if e[0] > horizon]
+            self._spend.clear()
+            self._spend.extend(events)
+        agg: Dict[str, Dict[str, float]] = {}
+        for _, path, w in events:
+            slot = agg.setdefault(path, {"calls": 0, "weight": 0.0})
+            slot["calls"] += 1
+            slot["weight"] += w
+        ranked = sorted(agg.items(), key=lambda kv: kv[1]["weight"],
+                        reverse=True)
+        return {
+            "window_s": int(window_s),
+            "total_calls": int(sum(v["calls"] for _, v in ranked)),
+            "total_weight": int(sum(v["weight"] for _, v in ranked)),
+            "paths": {p: {"calls": int(v["calls"]),
+                          "weight": int(v["weight"])}
+                      for p, v in ranked[:10]},
+        }
 
     def get_tickers_batch(self, symbols: List[str],
                           priority: bool = False) -> Dict[str, Dict]:

@@ -42,3 +42,32 @@ def _neutral_regime_policy(monkeypatch):
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _strip_singleton_static_shadows():
+    """v5.31: undo pytest's staticmethod instance-shadow leak on singletons.
+
+    `monkeypatch.setattr(single_instance, "some_staticmethod", fake)` records
+    the old value via getattr() (the plain function) and restores it with
+    setattr() ON THE INSTANCE - permanently SHADOWING the class-level
+    staticmethod with an instance attribute. The shadow holds the original
+    function so the leak was behavior-invisible for months, but it silently
+    takes precedence over any later class-level patch (v5.31 scalp tests
+    patched DataFetcher.get_candles on the class and never saw it fire).
+    After every test, drop instance attrs that merely shadow the class -
+    legit instance state (_ob_cache etc.) is not defined on the class and
+    survives untouched.
+    """
+    yield
+    import importlib
+    try:
+        dfm = importlib.import_module("src.core.data_fetcher")
+        inst = dfm.data_fetcher
+        cls = type(inst)
+        for name in list(vars(inst)):
+            if name in vars(cls) or any(
+                    name in vars(k) for k in cls.__mro__[1:]):
+                delattr(inst, name)
+    except Exception:
+        pass

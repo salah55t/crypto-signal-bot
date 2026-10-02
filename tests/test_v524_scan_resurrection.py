@@ -41,6 +41,16 @@ WSKlineFeed = wsmod.WSKlineFeed
 IVS = ("1h", "4h")
 
 
+@pytest.fixture(autouse=True)
+def _pin_v514_interval_set(monkeypatch):
+    """v5.31: WS_INTERVALS grew to cover every klines consumer (1m/1d/1s
+    joined 4h/1h). These tests verify the SEEDER's depth logic on a fixed
+    two-interval feed - pin the set so the contract stays interval-
+    agnostic (the v5.31 per-interval depth itself is tested in
+    test_v531_ws_tracked.py)."""
+    monkeypatch.setattr(settings, "WS_INTERVALS", list(IVS))
+
+
 # ---------- helpers ----------
 
 def _mk_feed(symbols, bars_per_key, fresh=True):

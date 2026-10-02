@@ -47,7 +47,10 @@ def _sig(direction, confidence):
 
 def test_settings_v55_defaults():
     assert settings.TIMEFRAMES == ["4h"]
-    assert settings.WS_INTERVALS == ["1h", "4h"]
+    # v5.31: WS_INTERVALS now covers EVERY recurring klines consumer -
+    # strategy TFs + 1h (map/router/filter) + 1m (momentum) + 1d (MTF)
+    # + 1s (micro-scalp) - same candles via the WS stream, zero REST.
+    assert settings.WS_INTERVALS == ["1d", "1h", "1m", "1s", "4h"]
     assert settings.OPPOSITE_SIGNAL_CONF == 55.0
     assert settings.SIGNAL_TIGHTEN_CONF == 40.0
     assert settings.CONTINUATION_CONF == 65.0

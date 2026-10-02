@@ -448,7 +448,9 @@ def test_seed_missing_paces_and_uses_candle_limit(monkeypatch):
 
     def fake_rest(sym, interval, limit=200):
         calls.append((sym, interval, limit))
-        return _df(300)
+        # v5.31: return the interval's DEPTH TARGET - the seeder must fetch
+        # enough bars for get_cached(limit=target) to actually serve.
+        return _df(wsm.WSKlineFeed._depth_target(interval))
 
     monkeypatch.setattr(dfmod.DataFetcher, "_get_candles_rest",
                         staticmethod(fake_rest))
@@ -457,7 +459,10 @@ def test_seed_missing_paces_and_uses_candle_limit(monkeypatch):
     # universe x every subscribed interval (settings.WS_INTERVALS)
     n_ivs = len(settings.WS_INTERVALS)
     assert len(calls) == 2 * n_ivs
-    assert all(lim == settings.CANDLE_LIMIT for _, _, lim in calls)
+    # v5.31: per-interval depth - 1s keys seed the full scalp history
+    # (SCALP_KLINES_LIMIT), everything else CANDLE_LIMIT
+    assert all(lim == wsm.WSKlineFeed._depth_target(iv)
+               for _, iv, lim in calls)
     assert feed._key("AAAUSDT", settings.WS_INTERVALS[0]) in feed._bars
     assert not feed._missing_keys()
 

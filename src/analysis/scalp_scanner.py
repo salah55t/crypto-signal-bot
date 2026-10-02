@@ -246,8 +246,31 @@ class ScalpScanner:
         return top
 
     def _scan_one(self, symbol: str) -> Optional[Dict]:
-        df = data_fetcher.get_candles(
-            symbol, "1s", limit=settings.SCALP_KLINES_LIMIT)
+        # v5.31: WS-first with a ZERO-REST warmup rule. The 1s history
+        # (SCALP_KLINES_LIMIT=1000 bars) is seeded ONCE by the paced WS
+        # seeder and then kept rolling by the @kline_1s stream - the old
+        # path re-fetched 1000 1s bars (weight 5) per shortlist symbol on
+        # EVERY tick (<= 75 weight/min, the bot's largest recurring REST
+        # cost, and the exact traffic that kept earning 418 bans on the
+        # shared Render IP). While the feed is active and this symbol is
+        # subscribed, a cache miss means the seeder is already fetching -
+        # a REST retry here would only duplicate that work, so we skip
+        # this tick instead (identical data once warmed; at most one
+        # tick of delay for a brand-new shortlist entry after a deploy).
+        df = None
+        try:
+            from src.core.ws_feed import ws_feed
+            if ws_feed.is_active() and ws_feed.subscribed(symbol, "1s"):
+                df = ws_feed.get_cached(
+                    symbol, settings.SCALP_KLINES_LIMIT, interval="1s")
+                if df is None:
+                    return {"symbol": symbol, "skip": True,
+                            "reason": "1s WS cache warming (zero REST)"}
+        except Exception:
+            df = None  # feed broken - fall through to the REST path
+        if df is None:
+            df = data_fetcher.get_candles(
+                symbol, "1s", limit=settings.SCALP_KLINES_LIMIT)
         if df is None or len(df) == 0:
             return {"symbol": symbol, "skip": True,
                     "reason": "no 1s data"}

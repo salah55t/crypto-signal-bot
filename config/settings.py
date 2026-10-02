@@ -367,9 +367,13 @@ class Settings:
     # trading; fewer noise-driven updates, cleaner trend following). Market
     # map / market-cycle correlation stays on 1h regardless.
     TIMEFRAMES: list = [tf.strip() for tf in os.getenv("TIMEFRAMES", "4h").split(",")]
-    # v5.5: intervals the WS kline feed subscribes to = strategy TFs + 1h
-    # (1h always kept: market map correlation + leader cycle read it free).
-    WS_INTERVALS: list = sorted({*TIMEFRAMES, "1h"})
+    # v5.5: intervals the WS kline feed subscribes to. v5.31: computed AFTER
+    # every WS consumer below (DOUBLE_IND_TIMEFRAME / scalp 1s) and now
+    # covers EVERY recurring klines read in the codebase - momentum (1m),
+    # MTF (1d), micro-scalp (1s) - so the steady-state REST spend of those
+    # scanners is ZERO (same Binance candles, delivered via the WS stream
+    # instead of weight-priced REST calls; signal logic untouched).
+    # Defined later in this class (see WS_INTERVALS v5.31).
     # Run every 10 minutes by default (was: hourly)
     # Examples: "*/10 * * * *" = every 10 min | "0 * * * *" = hourly | "*/30 * * * *" = every 30 min
     SCHEDULE_CRON: str = os.getenv("SCHEDULE_CRON", "*/10 * * * *")
@@ -618,6 +622,18 @@ class Settings:
     # 15 symbols x weight-5 (1s klines, limit 1000) = 75 REST weight/tick.
     SCALP_TOP_N: int = int(os.getenv("SCALP_TOP_N", "15"))
     SCALP_KLINES_LIMIT: int = int(os.getenv("SCALP_KLINES_LIMIT", "1000"))
+    # v5.31: WS_INTERVALS (moved here from the TIMEFRAMES block - it needs
+    # DOUBLE_IND_TIMEFRAME and the scalp settings below as inputs). Now the
+    # union of EVERY recurring klines consumer:
+    #   TIMEFRAMES            -> 4h strategies + analysis cycle
+    #   "1h"                  -> market map, regime router, market filter
+    #   DOUBLE_IND_TIMEFRAME  -> momentum scanner (default 1m, was REST per cycle)
+    #   "1d"                  -> MTF daily confluence (was REST per candidate)
+    #   "1s"                  -> micro-scalp when armed (was weight-5 x 15 EVERY tick)
+    # Same exchange candles, delivered by the WS stream: steady-state REST
+    # spend of these scanners drops to ~zero without touching signal logic.
+    WS_INTERVALS: list = sorted({*TIMEFRAMES, "1h", "1d", DOUBLE_IND_TIMEFRAME,
+                                 *(["1s"] if SCALP_ENABLED else [])})
     # Timeframe selection (the doc: 15s candles for a fast-but-calm market,
     # 30s candles for a very strong/fast market). Speed proxy = the absolute
     # move of the 1s closes over the last SCALP_SPEED_WINDOW_S seconds.
