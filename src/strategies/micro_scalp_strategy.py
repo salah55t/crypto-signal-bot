@@ -31,6 +31,20 @@ module closes that gap "بحذافيرها" (to the letter):
     disaster stop (0.8% floor) and the real exit is the scalp time exit in
     risk manager (first watcher tick past SCALP_HOLD_SECONDS).
 
+v5.27 FEE REALITY: the first live day produced 6/6 time-exit losses where
+fees were 72% of the realized loss - every trade fired in markets whose
+resampled-TF ATR was a fraction of the 0.2% spot round-trip fee, so the
+60s time exit paid the exchange regardless of signal quality. The entry
+gates are therefore now FEE-LINKED (settings keep the knobs):
+
+  * effective ATR floor  = max(SCALP_MIN_ATR_PCT,
+                               round_trip_fee * SCALP_FEE_COVER_MULT)
+    (0.2% * 1.25 = 0.25% at the default 0.1%/side taker fee) - one resampled
+    candle must be able to travel ~1.25x the fees for the hold to matter.
+  * effective range floor: SCALP_MIN_RANGE_PCT (0.60% over the lookback).
+  * TP1 floor = round_trip_fee + SCALP_MIN_NET_MOVE_PCT (>= 0.35%) - a
+    partial that cannot clear fees is not a target.
+
 The mirrored SELL setup (3 red candles below SuperTrend near the lower
 band) is intentionally NOT implemented - "عند الصعود فقط".
 """
@@ -140,12 +154,20 @@ class MicroScalpStrategy(BaseStrategy):
             return self._neutral("bad price")
 
         # === Anti-dead-market floors (resampled-TF scale) ===
+        # v5.27: the floors are FEE-LINKED - spot round-trip fees are
+        # 2 x TRADING_FEE_PCT; a market whose candle ATR (and whose 60-bar
+        # range) cannot cover them turns the 60s time exit into a guaranteed
+        # fee donation, so it is untradeable no matter how clean the setup.
+        fee_rt_pct = 2.0 * float(settings.TRADING_FEE_PCT)
+        min_atr_pct = max(settings.SCALP_MIN_ATR_PCT,
+                          fee_rt_pct * settings.SCALP_FEE_COVER_MULT)
         if atr_val > 0:
             atr_pct = atr_val / last_close * 100.0
-            if atr_pct < settings.SCALP_MIN_ATR_PCT:
+            if atr_pct < min_atr_pct:
                 return self._neutral(
-                    f"dead/pinned micro-range (TF ATR {atr_pct:.3f}% < "
-                    f"{settings.SCALP_MIN_ATR_PCT:.2f}%)")
+                    f"dead/fee-food micro-range (TF ATR {atr_pct:.3f}% < "
+                    f"fee-linked floor {min_atr_pct:.2f}% = fees "
+                    f"{fee_rt_pct:.2f}% x {settings.SCALP_FEE_COVER_MULT:g})")
         lb = min(60, len(rf))
         tail = rf.tail(lb)
         rng_pct = ((float(tail["high"].max()) - float(tail["low"].min()))
@@ -254,13 +276,17 @@ class MicroScalpStrategy(BaseStrategy):
         # === Spot-adaptation ladder: the TIME EXIT is the strategy; the SL
         # is a disaster stop with a floor wide enough to survive 60s noise,
         # TP2 = 2x the SL distance (RR >= 2 by construction), TP1 a quick
-        # partial that may print inside the minute. ===
+        # partial that may print inside the minute. v5.27: TP1 must clear
+        # the round-trip fee plus a net minimum - a partial that pays the
+        # exchange more than the trade is not a target. ===
         sl_dist = max(atr_val * settings.SCALP_SL_ATR_MULT,
                       last_close * settings.SCALP_SL_MIN_PCT / 100.0)
         tp2_dist = max(sl_dist * settings.SCALP_TP2_RR_MULT,
                        last_close * settings.SCALP_TP2_MIN_PCT / 100.0)
+        tp1_floor_pct = max(settings.SCALP_TP1_MIN_PCT,
+                            fee_rt_pct + settings.SCALP_MIN_NET_MOVE_PCT)
         tp1_dist = max(atr_val * settings.SCALP_TP1_ATR_MULT,
-                       last_close * settings.SCALP_TP1_MIN_PCT / 100.0)
+                       last_close * tp1_floor_pct / 100.0)
         details.update({
             "stop_loss": last_close - sl_dist,
             "take_profit": last_close + tp1_dist,
@@ -268,6 +294,11 @@ class MicroScalpStrategy(BaseStrategy):
             "tp1_pct": round(tp1_dist / last_close * 100, 3),
             "tp2_pct": round(tp2_dist / last_close * 100, 3),
             "sl_pct": round(sl_dist / last_close * 100, 3),
+            # v5.27 fee telemetry for the dashboard / debugging
+            "fee_rt_pct": round(fee_rt_pct, 3),
+            "min_atr_floor_pct": round(min_atr_pct, 3),
+            "atr_pct": round(atr_val / last_close * 100, 3)
+            if last_close > 0 else 0.0,
         })
 
         # LONG-ONLY by design: there is no bearish branch to fall into.

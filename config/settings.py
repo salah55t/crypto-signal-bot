@@ -458,6 +458,29 @@ class Settings:
         os.getenv("LADDER_LOCK3_LEVEL_PCT", "2.0"))
     LADDER_TRAIL_PCT: float = float(os.getenv("LADDER_TRAIL_PCT", "5.0"))
 
+    # --- v5.27 fee-survival rung (the 0-1% profit zone protection) ---
+    # The ladder's first rung sits at +1% profit; below that nothing locks
+    # anything, so a bounce that peaked at +0.4-0.9% and round-tripped paid
+    # FEES on a winner (live: DOGE peaked +0.46%, exited -0.295% net; the
+    # v5.19 forensics put the average bottom-bounce MFE at just 0.60%).
+    # Once MFE has peaked above the trigger and the trade has given back
+    # GIVEBACK_PCT from that peak while still below the ladder zone, the SL
+    # moves to entry + round-trip fees (+ NET_PCT) - a winner can no longer
+    # die as a fee loss. Scalp positions are exempt (they die at the fixed
+    # 60s time exit; the watcher has no mid-hold tick to apply it).
+    FEE_SURVIVAL_ENABLED: bool = os.getenv(
+        "FEE_SURVIVAL_ENABLED", "true").lower() == "true"
+    # min MFE (in %) that arms the rung; floor = round-trip fee + 0.25% so
+    # the lock always clears fees even if TRADING_FEE_PCT rises.
+    FEE_SURVIVAL_MFE_PCT: float = float(
+        os.getenv("FEE_SURVIVAL_MFE_PCT", "0.45"))
+    # give-back from the MFE peak (in %) that triggers the lock
+    FEE_SURVIVAL_GIVEBACK_PCT: float = float(
+        os.getenv("FEE_SURVIVAL_GIVEBACK_PCT", "0.20"))
+    # extra net margin above round-trip fees locked into the SL (in %)
+    FEE_SURVIVAL_NET_PCT: float = float(
+        os.getenv("FEE_SURVIVAL_NET_PCT", "0.02"))
+
     # --- v5.22 Double-Indicator momentum channel (user strategy, spot-only,
     #     long-only) ---
     # The user's documented strategy, applied to the letter:
@@ -502,16 +525,26 @@ class Settings:
     DOUBLE_IND_MIN_RANGE_PCT: float = float(
         os.getenv("DOUBLE_IND_MIN_RANGE_PCT", "0.60"))
     # Fee-survival exit ladder (percentage floors + ATR multiples).
-    # SL = max(1.5 x ATR, SL floor); TP1 = max(1.2 x ATR, TP1 floor);
+    # SL = max(1.5 x ATR, SL floor); TP1 = max(1.8 x ATR, TP1 floor);
     # TP2 = max(2.5 x ATR, TP2 floor); RR is computed on TP2.
     DOUBLE_IND_SL_MIN_PCT: float = float(
         os.getenv("DOUBLE_IND_SL_MIN_PCT", "0.55"))
+    # v5.27 fee reality (ZEC live loss): TP1 0.50% vs SL 0.55% with 0.2%
+    # round-trip fees = inverted geometry (net win 0.30% vs net loss 0.75%,
+    # breakeven win rate 71%). TP1 floor rises to 3.5x the round-trip fee
+    # (0.70% at 0.1%/side) and the TP1 ATR multiple rises to 1.8x so TP1
+    # >= SL by construction (RR on TP1 >= 1.2).
     DOUBLE_IND_TP1_MIN_PCT: float = float(
-        os.getenv("DOUBLE_IND_TP1_MIN_PCT", "0.50"))
+        os.getenv("DOUBLE_IND_TP1_MIN_PCT", "0.70"))
     DOUBLE_IND_TP2_MIN_PCT: float = float(
         os.getenv("DOUBLE_IND_TP2_MIN_PCT", "1.00"))
     DOUBLE_IND_TP1_ATR_MULT: float = float(
-        os.getenv("DOUBLE_IND_TP1_ATR_MULT", "1.2"))
+        os.getenv("DOUBLE_IND_TP1_ATR_MULT", "1.8"))
+    # v5.27: TP1 percentage floor = max(DOUBLE_IND_TP1_MIN_PCT,
+    # round_trip_fee_pct * DOUBLE_IND_FEE_TP1_MULT) - self-adapts if the
+    # fee schedule changes.
+    DOUBLE_IND_FEE_TP1_MULT: float = float(
+        os.getenv("DOUBLE_IND_FEE_TP1_MULT", "3.5"))
     DOUBLE_IND_TP2_ATR_MULT: float = float(
         os.getenv("DOUBLE_IND_TP2_ATR_MULT", "2.5"))
     DOUBLE_IND_SL_ATR_MULT: float = float(
@@ -573,9 +606,26 @@ class Settings:
     # Micro-scale anti-dead-market gates (resampled-TF scale): a pinned coin
     # cannot print three real green candles near the band, but stale/zero-
     # volume data can - the floors keep fee-food out.
-    SCALP_MIN_ATR_PCT: float = float(os.getenv("SCALP_MIN_ATR_PCT", "0.02"))
+    # v5.27 FEE REALITY (live evidence, 6/6 scalp losses on day one): the old
+    # 0.02% ATR floor admitted markets whose entire 60s hold moved < 0.1%
+    # while spot round-trip fees are 2 x TRADING_FEE_PCT = 0.2% - the time
+    # exit was a coin flip MINUS fees (MFE never exceeded 0.077%, fees were
+    # 72% of the realized loss). The floor is now fee-linked in the strategy:
+    # effective_min_atr = max(SCALP_MIN_ATR_PCT,
+    #                         round_trip_fee_pct * SCALP_FEE_COVER_MULT)
+    # so a 15s/30s candle must be able to travel at least ~1.25x the fees
+    # within ONE candle for the 60s hold to have a chance.
+    SCALP_MIN_ATR_PCT: float = float(os.getenv("SCALP_MIN_ATR_PCT", "0.25"))
     SCALP_MIN_RANGE_PCT: float = float(
-        os.getenv("SCALP_MIN_RANGE_PCT", "0.15"))
+        os.getenv("SCALP_MIN_RANGE_PCT", "0.60"))
+    # v5.27: fee-survival multipliers for the scalp floors (see above).
+    SCALP_FEE_COVER_MULT: float = float(
+        os.getenv("SCALP_FEE_COVER_MULT", "1.25"))
+    # v5.27: TP1 must clear round-trip fees PLUS this net minimum (in % of
+    # price) - a partial that pays the exchange more than the trade is
+    # not a target, it is a donation.
+    SCALP_MIN_NET_MOVE_PCT: float = float(
+        os.getenv("SCALP_MIN_NET_MOVE_PCT", "0.15"))
     # FIXED trade duration - the document's 1-minute holding, in seconds.
     SCALP_HOLD_SECONDS: int = int(os.getenv("SCALP_HOLD_SECONDS", "60"))
     # Spot-adaptation exit ladder, sized so the TIME EXIT dominates (the doc

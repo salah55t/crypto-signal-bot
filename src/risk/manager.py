@@ -1633,6 +1633,11 @@ class RiskManager:
           2. ATR chandelier: SL trails CHANDELIER_ATR_MULT x ATR below the
              highest price seen since entry (peak_price) once profit >= 1%.
              Market-adaptive: wide in trends, tight in chop.
+        v5.27 Mechanism 0 - fee-survival rung BELOW the ladder's first rung:
+        once MFE peaked >= FEE_SURVIVAL_MFE_PCT and the trade gave back
+        >= FEE_SURVIVAL_GIVEBACK_PCT from that peak while profit is still
+        < +1%, the SL locks entry + round-trip fees so a winner can no
+        longer die as a fee loss (live: DOGE peaked +0.46%, exited -0.30%).
         Safety: SL never loosens, and never goes above (current - 0.1%)
         for longs (would close instantly).
           - On bearish signal (conf > 60): tighten SL to 0.5% below current
@@ -1668,6 +1673,28 @@ class RiskManager:
             reason = ""
 
             if pos["direction"] == "bullish":
+                # --- v5.27 Mechanism 0: fee-survival rung (the 0-1% zone).
+                # The ladder's first rung sits at +1%; below it nothing was
+                # ever locked, so a bounce that peaked +0.4-0.9% and
+                # round-tripped died as a FEE LOSS on a winner (live: DOGE
+                # peaked +0.46%, exited -0.295% net). Once MFE peaked above
+                # the trigger and the trade gave back GIVEBACK_PCT from that
+                # peak while still below the ladder zone, lock
+                # entry + round-trip fees (+ NET_PCT).
+                fee_lock_sl = None
+                fee_mfe = 0.0
+                if settings.FEE_SURVIVAL_ENABLED:
+                    fee_rt_pct = 2.0 * float(settings.TRADING_FEE_PCT)
+                    fee_mfe = float(pos.get("mfe_pct") or 0.0)
+                    if (fee_mfe >= max(settings.FEE_SURVIVAL_MFE_PCT,
+                                       fee_rt_pct + 0.25)
+                            and (fee_mfe - profit_pct)
+                            >= settings.FEE_SURVIVAL_GIVEBACK_PCT
+                            and profit_pct < settings.LADDER_LOCK1_PCT):
+                        fee_lock_sl = entry * (
+                            1 + (fee_rt_pct + settings.FEE_SURVIVAL_NET_PCT)
+                            / 100.0)
+
                 # --- Mechanism 1: ladder (compute TARGET SL for the profit
                 # level, then take max(target, current_sl) so we always jump
                 # straight to the highest earned level.
@@ -1695,7 +1722,18 @@ class RiskManager:
                 if target_sl is not None and target_sl > current_sl:
                     new_sl = target_sl
 
-                # --- Mechanism 2: ATR chandelier (v5) ---
+                # --- v5.27 fee-survival compose: the rung may raise the SL
+                # even when every ladder rung is still out of reach (profit
+                # < LADDER_LOCK1_PCT means no rung fired, so this only ever
+                # TIGHTENS from the raw stop).
+                if fee_lock_sl is not None:
+                    floor_sl = new_sl if new_sl is not None else current_sl
+                    if fee_lock_sl > floor_sl:
+                        new_sl = fee_lock_sl
+                        reason = (
+                            f"Fee-survival lock: MFE {fee_mfe:.2f}% gave "
+                            f"back {fee_mfe - profit_pct:.2f}% -> SL to "
+                            f"BE+fees")
                 if settings.CHANDELIER_ENABLED and profit_pct >= 1.0:
                     atr_val = self._atr_for(symbol, market_signals, pos)
                     if atr_val and atr_val > 0:
@@ -1741,6 +1779,22 @@ class RiskManager:
                             reason += f" + Locked {locked_pct:.2f}% profit"
 
             elif pos["direction"] == "bearish":
+                # v5.27 fee-survival rung, mirrored for shorts (MFE is
+                # direction-agnostic - the favorable excursion in %).
+                fee_lock_sl = None
+                fee_mfe = 0.0
+                if settings.FEE_SURVIVAL_ENABLED:
+                    fee_rt_pct = 2.0 * float(settings.TRADING_FEE_PCT)
+                    fee_mfe = float(pos.get("mfe_pct") or 0.0)
+                    if (fee_mfe >= max(settings.FEE_SURVIVAL_MFE_PCT,
+                                       fee_rt_pct + 0.25)
+                            and (fee_mfe - profit_pct)
+                            >= settings.FEE_SURVIVAL_GIVEBACK_PCT
+                            and profit_pct < settings.LADDER_LOCK1_PCT):
+                        fee_lock_sl = entry * (
+                            1 - (fee_rt_pct + settings.FEE_SURVIVAL_NET_PCT)
+                            / 100.0)
+
                 # mirror ladder for bearish (chandelier mirrored, v5.20 rungs)
                 target_sl = None
                 if profit_pct >= settings.LADDER_TRAIL_PCT:
@@ -1760,6 +1814,17 @@ class RiskManager:
                               f"(current +{profit_pct:.2f}%)")
                 if target_sl is not None and (current_sl is None or target_sl < current_sl):
                     new_sl = target_sl
+
+                # v5.27 fee-survival compose (short side): the lock is a
+                # LOWER price - it only applies when it tightens.
+                if fee_lock_sl is not None:
+                    floor_sl = new_sl if new_sl is not None else current_sl
+                    if floor_sl is None or fee_lock_sl < floor_sl:
+                        new_sl = fee_lock_sl
+                        reason = (
+                            f"Fee-survival lock: MFE {fee_mfe:.2f}% gave "
+                            f"back {fee_mfe - profit_pct:.2f}% -> SL to "
+                            f"BE+fees")
 
                 if settings.CHANDELIER_ENABLED and profit_pct >= 1.0:
                     atr_val = self._atr_for(symbol, market_signals, pos)

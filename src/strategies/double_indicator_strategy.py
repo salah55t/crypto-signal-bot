@@ -197,16 +197,25 @@ class DoubleIndicatorStrategy(BaseStrategy):
         details["score"] = float(score)
 
         # === Fee-survival exit ladder (spot adaptation) ===
+        # v5.27: TP1 is fee-linked and ATR-dominant. Live evidence (ZEC):
+        # TP1 0.50% vs SL 0.55% with 0.2% round-trip fees = inverted
+        # geometry (net win 0.30% vs net loss 0.75% -> breakeven win rate
+        # 71%). TP1 floor = max(TP1_MIN_PCT, 3.5 x round-trip fee) and the
+        # TP1 ATR multiple (1.8x) now exceeds the SL multiple (1.5x) so
+        # RR-on-TP1 >= 1.2 by construction.
+        fee_rt_pct = 2.0 * float(settings.TRADING_FEE_PCT)
+        tp1_floor_pct = max(settings.DOUBLE_IND_TP1_MIN_PCT,
+                            fee_rt_pct * settings.DOUBLE_IND_FEE_TP1_MULT)
         if atr_val > 0 and last_close > 0:
             sl_dist = max(atr_val * settings.DOUBLE_IND_SL_ATR_MULT,
                           last_close * settings.DOUBLE_IND_SL_MIN_PCT / 100.0)
             tp1_dist = max(atr_val * settings.DOUBLE_IND_TP1_ATR_MULT,
-                           last_close * settings.DOUBLE_IND_TP1_MIN_PCT / 100.0)
+                           last_close * tp1_floor_pct / 100.0)
             tp2_dist = max(atr_val * settings.DOUBLE_IND_TP2_ATR_MULT,
                            last_close * settings.DOUBLE_IND_TP2_MIN_PCT / 100.0)
         else:
             sl_dist = last_close * settings.DOUBLE_IND_SL_MIN_PCT / 100.0
-            tp1_dist = last_close * settings.DOUBLE_IND_TP1_MIN_PCT / 100.0
+            tp1_dist = last_close * tp1_floor_pct / 100.0
             tp2_dist = last_close * settings.DOUBLE_IND_TP2_MIN_PCT / 100.0
         details.update({
             "stop_loss": last_close - sl_dist,
@@ -215,6 +224,8 @@ class DoubleIndicatorStrategy(BaseStrategy):
             "tp1_pct": round(tp1_dist / last_close * 100, 3),
             "tp2_pct": round(tp2_dist / last_close * 100, 3),
             "sl_pct": round(sl_dist / last_close * 100, 3),
+            # v5.27 fee telemetry
+            "fee_rt_pct": round(fee_rt_pct, 3),
         })
 
         # LONG-ONLY by design: there is no bearish branch to fall into.
