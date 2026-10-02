@@ -9,6 +9,8 @@ Tests for v2 improvements:
 Run: pytest tests/test_v2_improvements.py -v
 """
 import sys
+
+import pytest
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -107,24 +109,37 @@ def test_confidence_neutral_is_zero_not_fifty():
 
 
 def test_confidence_scales_with_confluence():
-    """More agreeing strategies => higher confidence (monotonic)."""
+    """v5.28 contract: equal-strength voters raise confidence until the
+    confluence cap, and a lone strong signal is ALREADY meaningful (>=
+    MIN_CONFIDENCE - the starvation fix; under REF=5.8 it sat at 64%)."""
     from src.analysis.scorer import SignalScorer
     s = SignalScorer()
-    one = s._compute_confidence([_make_signal(80), _make_signal(0), _make_signal(0)], s.strategies)
-    two = s._compute_confidence([_make_signal(80), _make_signal(70), _make_signal(0)], s.strategies)
-    three = s._compute_confidence([_make_signal(80), _make_signal(70), _make_signal(65)], s.strategies)
-    assert one["confidence"] < two["confidence"] < three["confidence"]
-    assert one["confidence"] > 55   # single strong strategy is already meaningful
+    one = s._compute_confidence([_make_signal(80), _make_signal(0),
+                                 _make_signal(0)], s.strategies)
+    two = s._compute_confidence([_make_signal(80), _make_signal(80),
+                                 _make_signal(0)], s.strategies)
+    three = s._compute_confidence([_make_signal(80), _make_signal(80),
+                                   _make_signal(80)], s.strategies)
+    assert one["confidence"] < two["confidence"]
+    # cap reached: a third equal voter cannot push past full confluence
+    assert two["confidence"] == pytest.approx(three["confidence"])
+    assert one["confidence"] >= 68  # solo strength is now admissible
     assert three["confidence"] < 100
 
 
 def test_confidence_opposing_signals_reduced():
-    """A strong opposing vote must reduce confidence vs unanimous."""
+    """A strong opposing vote must drag the blended score toward neutral
+    (below DIRECTION_THRESHOLD) where confidence collapses to 0 - the
+    direction-level protection the model guarantees."""
     from src.analysis.scorer import SignalScorer
     s = SignalScorer()
-    unanimous = s._compute_confidence([_make_signal(80), _make_signal(70), _make_signal(65)], s.strategies)
-    opposed = s._compute_confidence([_make_signal(80), _make_signal(-70), _make_signal(65)], s.strategies)
+    unanimous = s._compute_confidence(
+        [_make_signal(80), _make_signal(80), _make_signal(80)], s.strategies)
+    opposed = s._compute_confidence(
+        [_make_signal(80), _make_signal(-80), _make_signal(0)], s.strategies)
     assert opposed["confidence"] < unanimous["confidence"]
+    assert opposed["direction"] == "neutral"
+    assert opposed["confidence"] == 0.0
 
 
 # ============================================================

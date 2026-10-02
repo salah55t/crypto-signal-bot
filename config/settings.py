@@ -201,6 +201,19 @@ class Settings:
         "STRATEGY_MACD_BREAKOUT_ENABLED", "true").lower() == "true"
     STRATEGY_MACD_BREAKOUT_WEIGHT: float = float(
         os.getenv("STRATEGY_MACD_BREAKOUT_WEIGHT", "1.4"))
+    # v5.28: the original calibrated trio is settings-gated too, with
+    # evidence-based defaults (scripts/research/ baseline: 39 top-volume
+    # pairs, ~500 days of real 4h klines, production exit lifecycle, 0.24%
+    # round-trip costs, 4 time-folds):
+    #   volatility_breakout  +18.9 bps/trade, PF 1.58, ALL folds > 0 -> ON
+    #   trend_pullback       -0.5 bps/trade, PF 0.99, folds mixed   -> OFF
+    #   liquidity_sweep      -6.9 bps/trade, PF 0.81, ALL folds < 0 -> OFF
+    STRATEGY_VOL_BREAKOUT_ENABLED: bool = os.getenv(
+        "STRATEGY_VOL_BREAKOUT_ENABLED", "true").lower() == "true"
+    STRATEGY_TREND_PULLBACK_ENABLED: bool = os.getenv(
+        "STRATEGY_TREND_PULLBACK_ENABLED", "false").lower() == "true"
+    STRATEGY_LIQUIDITY_SWEEP_ENABLED: bool = os.getenv(
+        "STRATEGY_LIQUIDITY_SWEEP_ENABLED", "false").lower() == "true"
     # Confluence scale reference. The strength x confluence confidence model
     # was CALIBRATED on the original 3-strategy stack (total weight 5.8):
     # "one strong strategy ~= 64%, two agreeing ~= 76%". Adding strategies
@@ -209,8 +222,21 @@ class Settings:
     # confluence = agree_w / max(total_weight, REF) capped at 1.0 - the
     # original stack behaves bit-identically; extra strategies can only ADD
     # confluence when they actually agree, never punish a lone signal.
+    #
+    # v5.28 STARVATION FIX: REF stays the SCALE ANCHOR, but 5.8 condemned
+    # every solo vote to confluence 0.21-0.34, so a lone full signal needed
+    # strength >= 86-93 to clear MIN_CONFIDENCE=68. Live evidence: ZERO
+    # composite trades ever opened (all live trades came from boost
+    # channels). Research baseline (39 pairs x ~500 days): the strategies
+    # DO fire (17k full signals) and the surviving ones carry real edge
+    # (volatility_breakout +18.9 bps/trade PF 1.58 all folds positive) -
+    # the pipeline, not the signals, was the bottleneck. REF 5.8 -> 2.0:
+    # a solo vote of weight 1.8 now maps to confluence 0.90, so a full
+    # signal needs strength >= ~56 instead of ~86. With the two
+    # negative-edge composites retired (see scorer), opening the pipe
+    # admits more of the trades the harness validated as profitable.
     STRATEGY_CONFLUENCE_REF_WEIGHT: float = float(
-        os.getenv("STRATEGY_CONFLUENCE_REF_WEIGHT", "5.8"))
+        os.getenv("STRATEGY_CONFLUENCE_REF_WEIGHT", "2.0"))
 
     # --- Rate limiting (Binance 6000 weight/min, shared Render IP) ---
     RATE_LIMIT_BUDGET_PER_MIN: int = int(os.getenv("RATE_LIMIT_BUDGET_PER_MIN", "4500"))
@@ -776,6 +802,63 @@ class Settings:
 
     # --- Capital (for paper trading) ---
     INITIAL_CAPITAL: float = float(os.getenv("INITIAL_CAPITAL", "10000"))
+
+    # ------------------------------------------------------------------
+    # v5.28 TREND BOOST CHANNEL (evidence-based strategy replacement)
+    # ------------------------------------------------------------------
+    # Research (scripts/research/, 40 top-volume USDT pairs x ~500 days of
+    # real 4h klines, 0.24% round-trip cost, production exit lifecycle,
+    # 4 time-folds, bootstrap CIs) selected two entry families with
+    # positive out-of-sample expectancy AFTER fees:
+    #
+    #   donchian_break  - close crosses above the 55-bar high with volume
+    #                     >= 1.2x avg: n=1300, WR 63.7%, +28.3 bps/trade,
+    #                     PF 1.98, ALL four folds positive
+    #                     (+18.8/+14.5/+32.8/+47.2 bps).
+    #   st_flip         - production SuperTrend(10,3) flips up with close
+    #                     above EMA200: n=500, WR 51.6%, +14.7 bps/trade,
+    #                     PF 1.50, ALL four folds positive
+    #                     (+12.6/+7.2/+18.3/+20.5).
+    # Rejected by the same harness: RSI(2) dip-buying (negative expectancy
+    # in the bear half of the window) and BB-squeeze breakout (CI crosses
+    # zero). A BTC-tide pre-filter HURT the Donchian channel (delays
+    # entries into recovering markets) so it is OFF by default here; the
+    # global market-tide gate in risk manager still applies.
+    #
+    # Both signals are evaluated on the primary 4h timeframe and are served
+    # from the WS cache - the channel costs ZERO extra REST weight.
+    # Geometry by construction: SL 2.0xATR, TP1 2.4xATR (gross RR 1.2 on
+    # TP1, fee-adjusted breakeven WR ~58%), TP2 4.8xATR (RR 2.4).
+    TREND_BOOST_ENABLED: bool = os.getenv(
+        "TREND_BOOST_ENABLED", "true").lower() == "true"
+    TREND_DONCHIAN_PERIOD: int = int(os.getenv("TREND_DONCHIAN_PERIOD", "55"))
+    TREND_VOL_MULT: float = float(os.getenv("TREND_VOL_MULT", "1.2"))
+    TREND_ST_PERIOD: int = int(os.getenv("TREND_ST_PERIOD", "10"))
+    TREND_ST_MULT: float = float(os.getenv("TREND_ST_MULT", "3.0"))
+    TREND_EMA_PERIOD: int = int(os.getenv("TREND_EMA_PERIOD", "200"))
+    TREND_SL_ATR: float = float(os.getenv("TREND_SL_ATR", "2.0"))
+    TREND_TP1_ATR: float = float(os.getenv("TREND_TP1_ATR", "2.4"))
+    TREND_TP2_ATR: float = float(os.getenv("TREND_TP2_ATR", "4.8"))
+    # Market-sanity gates (mirrors the global dead/vol-extreme definition).
+    TREND_MIN_ATR_PCT: float = float(os.getenv("TREND_MIN_ATR_PCT", "0.30"))
+    TREND_MAX_ATR_PCT: float = float(os.getenv("TREND_MAX_ATR_PCT", "3.5"))
+    # Scan the liquid head (dynamic universe is volume-sorted); 4h candles
+    # come from the WS cache so weight cost is zero, keep the knob anyway.
+    TREND_TOP_N: int = int(os.getenv("TREND_TOP_N", "40"))
+    TREND_KLINES_LIMIT: int = int(os.getenv("TREND_KLINES_LIMIT", "300"))
+    TREND_MIN_SCORE: int = int(os.getenv("TREND_MIN_SCORE", "62"))
+    TREND_CONF_CAP: int = int(os.getenv("TREND_CONF_CAP", "72"))
+    TREND_MAX_PER_CYCLE: int = int(os.getenv("TREND_MAX_PER_CYCLE", "2"))
+    TREND_MAX_OPEN_CONCURRENT: int = int(
+        os.getenv("TREND_MAX_OPEN_CONCURRENT", "3"))
+    TREND_ENTRY_SPACING_MIN: int = int(
+        os.getenv("TREND_ENTRY_SPACING_MIN", "60"))
+    TREND_SYMBOL_COOLDOWN_MIN: int = int(
+        os.getenv("TREND_SYMBOL_COOLDOWN_MIN", "240"))
+    # Research: tide-filtering the Donchian channel lowered expectancy
+    # (+28.3 -> +21.5 bps) and made fold 2 negative. Default OFF.
+    TREND_BTC_TIDE_GATE: bool = os.getenv(
+        "TREND_BTC_TIDE_GATE", "false").lower() == "true"
 
     @classmethod
     def load_coins(cls) -> list:

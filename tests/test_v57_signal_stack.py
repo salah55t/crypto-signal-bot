@@ -156,19 +156,28 @@ def test_settings_v57_defaults():
     assert settings.STRATEGY_BB_MEAN_REV_WEIGHT == 1.2
     assert settings.STRATEGY_MACD_BREAKOUT_ENABLED is True
     assert settings.STRATEGY_MACD_BREAKOUT_WEIGHT == 1.4
-    assert settings.STRATEGY_CONFLUENCE_REF_WEIGHT == 5.8
+    # v5.28 starvation fix: REF 5.8 -> 2.0 (solo votes needed strength
+    # >= 86-93 to clear MIN_CONFIDENCE=68 under the old scale; live
+    # evidence: ZERO composite trades ever opened)
+    assert settings.STRATEGY_CONFLUENCE_REF_WEIGHT == 2.0
     assert settings.CANDLE_LIMIT == 300
+    # v5.28 evidence-based composite defaults
+    assert settings.STRATEGY_VOL_BREAKOUT_ENABLED is True
+    assert settings.STRATEGY_TREND_PULLBACK_ENABLED is False
+    assert settings.STRATEGY_LIQUIDITY_SWEEP_ENABLED is False
 
 
-def test_scorer_registers_six_strategies():
+def test_scorer_registers_default_four_strategies():
     scorer = SignalScorer()
     names = [s.name for s in scorer.strategies]
+    # v5.28: trend_pullback (-0.5 bps/trade) and liquidity_sweep_reversal
+    # (-6.9 bps/trade, ALL folds negative) retired by the research baseline
     assert names == [
-        "trend_pullback", "liquidity_sweep_reversal", "volatility_breakout",
-        "triple_confluence_trend", "bb_mean_reversion", "macd_breakout",
+        "volatility_breakout", "triple_confluence_trend",
+        "bb_mean_reversion", "macd_breakout",
     ]
-    # 2.0 + 2.0 + 1.8 + 1.6 + 1.2 + 1.4 = 10.0
-    assert scorer.total_weight == pytest.approx(10.0)
+    # 1.8 + 1.6 + 1.2 + 1.4 = 6.0
+    assert scorer.total_weight == pytest.approx(6.0)
 
 
 def test_scorer_respects_toggles(monkeypatch):
@@ -176,7 +185,7 @@ def test_scorer_respects_toggles(monkeypatch):
     scorer = SignalScorer()
     names = [s.name for s in scorer.strategies]
     assert "triple_confluence_trend" not in names
-    assert len(names) == 5  # original 3 + the two remaining v5.7 ones
+    assert len(names) == 3  # vol_breakout + the two remaining v5.7 ones
 
 
 # ============================================
@@ -193,39 +202,50 @@ def _bull(score):
 
 
 def test_lone_signal_confidence_unchanged_on_original_stack():
-    """One strong strategy @80 on the ORIGINAL 3-stack -> ~64% (calibration)."""
+    """v5.28: one strong strategy @80 on the ORIGINAL 3-stack - the top
+    weight (2.0) maps to confluence 1.0 under REF=2.0, so the lone signal
+    lands at 0.65*0.8 + 0.35*1.0 = 87% and CLEARS MIN_CONFIDENCE=68.
+    Under the old REF=5.8 the same signal sat at 64% and needed strength
+    >= 86 to trade (the starvation bug - live: zero composite trades)."""
     scorer = SignalScorer()
     old3 = [TrendPullbackStrategy(2.0), LiquiditySweepReversalStrategy(2.0),
             VolatilityBreakoutStrategy(1.8)]
     v = scorer._compute_confidence([_bull(80), Signal(strategy="y"),
                                     Signal(strategy="z")], old3)
-    assert v["confidence"] == pytest.approx(64.07, abs=0.05)
+    assert v["confidence"] == pytest.approx(87.0, abs=0.05)
+    assert v["confidence"] >= settings.MIN_CONFIDENCE
 
 
-def test_lone_signal_confidence_not_diluted_on_six_stack():
-    """The SAME lone signal keeps ~64% even with 6 registered strategies -
-    adding strategies must never silently raise the admission bar."""
+def test_lone_signal_confidence_not_diluted_on_default_stack():
+    """The SAME lone signal keeps 83.5% on the default 4-stack -
+    registered-but-silent strategies never dilute the scale (agree_w is
+    measured against REF=2.0, not the live total 6.0), and it still
+    clears the admission gate."""
     scorer = SignalScorer()
-    six = scorer.strategies
-    signals = [_bull(80)] + [Signal(strategy="y") for _ in range(5)]
-    v = scorer._compute_confidence(signals, six)
-    assert v["confidence"] == pytest.approx(64.07, abs=0.05)
+    four = scorer.strategies
+    signals = [_bull(80)] + [Signal(strategy="y") for _ in range(3)]
+    v = scorer._compute_confidence(signals, four)
+    # agree_w = 1.8 -> confluence 0.9 -> 0.65*0.8 + 0.35*0.9
+    assert v["confidence"] == pytest.approx(83.5, abs=0.05)
+    assert v["confidence"] >= settings.MIN_CONFIDENCE
 
 
 def test_confluence_capped_and_additive():
-    """All six agreeing -> confluence capped at 1.0; agreements from the new
-    trio ADD to a two-strategy signal instead of diluting it."""
+    """Confluence is additive up to the 1.0 cap: a 1.4-weight solo vote
+    maps to 0.7, a 1.8-weight vote to 0.9, and any pair saturates at
+    1.0 - heavier stacks can only ADD confluence, never dilute."""
     scorer = SignalScorer()
-    six = scorer.strategies
-    # all agree @80
-    v_all = scorer._compute_confidence([_bull(80)] * 6, six)
+    four = scorer.strategies
+    # macd breakout (1.4) alone @80 -> confluence 0.7
+    v_macd = scorer._compute_confidence(
+        [Signal(strategy="z"), Signal(strategy="z"), Signal(strategy="z"),
+         _bull(80)], four)
+    assert v_macd["confluence"] == pytest.approx(0.7, abs=1e-6)
+    assert v_macd["confidence"] == pytest.approx(76.5, abs=0.05)
+    # all four agree @80 -> capped at 1.0
+    v_all = scorer._compute_confidence([_bull(80)] * 4, four)
     assert v_all["confluence"] == 1.0
     assert v_all["confidence"] == pytest.approx(87.0, abs=0.05)
-    # original two agree (4.0) + macd breakout (1.4) -> confluence 5.4/5.8 (was 4/5.8)
-    sigs = [_bull(80), _bull(80), Signal(strategy="z"), Signal(strategy="z"),
-            Signal(strategy="z"), _bull(80)]
-    v = scorer._compute_confidence(sigs, six)
-    assert v["confluence"] == pytest.approx(5.4 / 5.8, abs=1e-6)
 
 
 # ============================================
@@ -334,12 +354,11 @@ def test_macd_breakout_needs_price_above_ema50():
 # Integration: through the full scorer pipeline
 # ============================================
 
-def test_scorer_analyze_symbol_runs_all_six():
-    from src.indicators.technical import atr
+def test_scorer_analyze_symbol_runs_all_default_strategies():
     scorer = SignalScorer()
     df = triple_bull_df()
     result = scorer.analyze_symbol(df, "TESTUSDT")
     sig_names = [s["strategy"] for s in result["signals"]]
-    assert len(sig_names) == 6
+    assert len(sig_names) == 4  # the v5.28 default stack
     assert "triple_confluence_trend" in sig_names
     assert result["direction"] in ("bullish", "bearish", "neutral")
