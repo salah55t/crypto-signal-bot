@@ -50,10 +50,16 @@ _daily_cache: Dict[str, tuple] = {}
 
 
 def _ban_active(threshold: float = 60.0) -> bool:
-    """True while a Binance cooldown is in force - do NOT add REST load."""
+    """True while a Binance cooldown is in force - do NOT add REST load.
+
+    v5.32: the PROBE WINDOW (cooldown expired, IP unverified) counts as
+    ban-active too - skip quietly instead of raising through the client's
+    probe gate (consistent with analyzer._ban_active and the v5.30
+    zero-REST guard in get_batch_prices)."""
     try:
         from src.core.rate_limiter import rate_limiter
-        return rate_limiter.cooldown_remaining() > threshold
+        return (rate_limiter.cooldown_remaining() > threshold
+                or rate_limiter.needs_probe())
     except Exception:
         return False
 

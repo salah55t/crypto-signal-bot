@@ -33,6 +33,7 @@ def _isolate_shared_limiter():
         "_armed_total": rl._armed_total,
         "_pressure_streak": rl._pressure_streak,
         "_last_pressure_ts": rl._last_pressure_ts,
+        "_probe_reject_streak": rl._probe_reject_streak,  # v5.32 backoff depth
     }
     snap_events = list(rl._events)
     yield

@@ -95,6 +95,9 @@ class WeightedRateLimiter:
         self._armed_total = 0       # fresh cooldown episodes this process
         self._probe_required = False
         self._probe_claimed = False
+        # v5.32: consecutive probe REJECTIONS - drives the probe backoff
+        # margin (see trigger_cooldown). Reset on any successful probe.
+        self._probe_reject_streak = 0
         # v5.15: restore a ban that was armed by a PREVIOUS process
         self._restore_from_disk()
 
@@ -231,14 +234,36 @@ class WeightedRateLimiter:
         /api/health visibility, and a real server ban of PROBE_MIN_S or
         longer arms the post-ban probe gate. Header-pressure cooldowns
         (<= 300s, neighbor-driven) never arm the probe.
+
+        v5.32: PROBE BACKOFF. source="probe_reject" means the weight-1
+        verification probe itself was answered 418 - one more poke into a
+        still-banned IP, and poking at the exact Retry-After expiry again
+        and again reads as a repeat offense (observed escalation
+        1892s -> 2701s -> 3121s). Consecutive rejections now add a growing
+        margin ON TOP of the server value (base 300s, x2 per consecutive
+        rejection, cap 3600s; PROBE_BACKOFF_BASE_S / PROBE_BACKOFF_MAX_S)
+        so our own probe contribution to the herd's ban shrinks the longer
+        it lasts. finish_probe(True) resets the streak - a VERIFIED clean
+        IP starts the next ban cycle from the base margin.
         """
         # v5.15: cap raised 3600 -> 86400. Binance 418 Retry-After values can
         # exceed 1h for repeat offenders; re-poking after our (capped) cooldown
         # only EXTENDED the ban. Call sites pre-cap their own semantics
         # (429 keeps <= 3600, pressure keeps <= 300); this is a sanity bound.
-        seconds = max(1.0, min(float(seconds), COOLDOWN_HARD_CAP_S))
+        # v5.32: the backoff margin is added BEFORE this cap so the total
+        # armed cooldown (server value + margin) stays inside the bound.
+        seconds = float(seconds)
         now = time.monotonic()
         with self._lock:
+            if source == "probe_reject":
+                self._probe_reject_streak += 1
+                base = float(getattr(_settings, "PROBE_BACKOFF_BASE_S", 300.0))
+                cap = float(getattr(_settings, "PROBE_BACKOFF_MAX_S", 3600.0))
+                if base > 0.0:
+                    margin = min(base * (2 ** (self._probe_reject_streak - 1)),
+                                 cap)
+                    seconds += margin
+            seconds = max(1.0, min(seconds, COOLDOWN_HARD_CAP_S))
             was_in_cooldown = now < self._cooldown_until
             prev_remaining = max(0.0, self._cooldown_until - now) if was_in_cooldown else 0.0
             until = now + seconds
@@ -330,13 +355,15 @@ class WeightedRateLimiter:
 
         success=True: the IP answered normally - release the herd.
         success=False: the probe was rejected/errored (the client has
-        already re-armed a cooldown) - free the claim so the next tick can
-        try again after the new cooldown expires.
+        already re-armed a cooldown, v5.32: with a growing backoff margin
+        on top) - free the claim so the next tick can try again after the
+        new cooldown expires.
         """
         with self._lock:
             self._probe_claimed = False
             if success:
                 self._probe_required = False
+                self._probe_reject_streak = 0  # v5.32: verified clean -> fresh backoff
 
     def last_source(self) -> str:
         """Why the last cooldown was armed (for /api/health)."""
@@ -347,6 +374,15 @@ class WeightedRateLimiter:
         """Fresh cooldown episodes armed by THIS process."""
         with self._lock:
             return self._armed_total
+
+    def probe_reject_streak(self) -> int:
+        """v5.32: consecutive probe rejections (backoff depth, /api/health).
+
+        0 = last probe was OK / no rejections yet; rising = the shared IP
+        keeps answering 418 and we probe at Retry-After + a growing margin
+        (300s x2 per rejection, cap 3600s) instead of poking at expiry."""
+        with self._lock:
+            return self._probe_reject_streak
 
     # ------------------------------------------------------------------
     def note_server_weight(self, used: int) -> None:

@@ -28,10 +28,18 @@ def _ban_active(threshold: float = 130.0) -> bool:
     Mirrors the retry_on_failure abort threshold (130s): below it calls
     still back off and retry; above it every REST call is doomed, so the
     whole burst should stop instead of grinding through the symbol list.
+
+    v5.32: the PROBE WINDOW (cooldown expired, IP not yet verified by the
+    weight-1 probe) counts as ban-active too. Callers then skip QUIETLY
+    (disk cache / static fallback, "ban is an expected state") instead of
+    raising through the client's probe gate with an ERROR-level exception
+    per call. Same semantics as the v5.30 zero-REST guard in
+    get_batch_prices - now consistent across every guard in the codebase.
     """
     try:
         from src.core.rate_limiter import rate_limiter
-        return rate_limiter.cooldown_remaining() > threshold
+        return (rate_limiter.cooldown_remaining() > threshold
+                or rate_limiter.needs_probe())
     except Exception:
         return False
 

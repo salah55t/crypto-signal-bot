@@ -311,6 +311,15 @@ class Settings:
     # many seconds - short shared-IP pressure blips are not worth inheriting
     # across restarts.
     RATE_STATE_MIN_S: float = float(os.getenv("RATE_STATE_MIN_S", "60"))
+    # v5.32 probe backoff: after each consecutive probe REJECTION (the
+    # weight-1 /time probe answered 418) the next probe waits the server
+    # Retry-After PLUS a growing margin - base seconds doubled per
+    # consecutive rejection, capped. Base 0 disables the margin entirely.
+    # Rationale: poking a banned IP at the exact Retry-After expiry reads
+    # as a repeat offense and can EXTEND the ban (observed Retry-After
+    # escalation 1892s -> 2701s -> 3121s on the shared Render egress IP).
+    PROBE_BACKOFF_BASE_S: float = float(os.getenv("PROBE_BACKOFF_BASE_S", "300"))
+    PROBE_BACKOFF_MAX_S: float = float(os.getenv("PROBE_BACKOFF_MAX_S", "3600"))
 
     # --- v5.16 session clock: the fixed daily rhythm of every desk --------
     # Diagnostic (90d, 171 live-logic trades): hours 11-14 UTC (London close

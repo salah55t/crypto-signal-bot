@@ -164,6 +164,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(rl_mod.rate_limiter, "_probe_claimed", False)
     monkeypatch.setattr(rl_mod.rate_limiter, "_last_source", "none")
     monkeypatch.setattr(rl_mod.rate_limiter, "_armed_total", 0)
+    # v5.32: probe backoff depth - deterministic margins per test
+    monkeypatch.setattr(rl_mod.rate_limiter, "_probe_reject_streak", 0)
     cl = mod.binance_client
     cl._xinfo = None
     cl._xinfo_ts = 0.0
