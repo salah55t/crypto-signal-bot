@@ -74,6 +74,29 @@ class WSKlineFeed:
     """
 
     MAX_BARS = 400  # headroom above CANDLE_LIMIT=300 (v5.7, EMA200 warmup) and map lookback=168
+    # v5.31: 1s keys must hold the FULL scalp history (SCALP_KLINES_LIMIT=1000
+    # 1s bars = ~17 min) or get_cached(limit=1000) would never serve and the
+    # scalp scanner would fall back to weight-5 REST every tick - the exact
+    # spend this release removes. 1100 = headroom above the 1000-bar read.
+    MAX_BARS_1S = 1100
+
+    def _maxlen_for(self, interval: str) -> int:
+        """Per-interval deque cap (1s needs the full scalp history)."""
+        return self.MAX_BARS_1S if interval == "1s" else self.MAX_BARS
+
+    @staticmethod
+    def _depth_target(interval: str) -> int:
+        """Bars the seeder/reseed must fetch for one key (v5.31).
+
+        get_cached() refuses to serve while len(bars) < limit, so the seed
+        depth must match what each interval's consumers actually read:
+        CANDLE_LIMIT everywhere EXCEPT 1s, whose reader (scalp) asks for
+        SCALP_KLINES_LIMIT=1000 - seeding 300 would leave the key
+        permanently short and pin the old REST cost in place.
+        """
+        if interval == "1s":
+            return max(1, int(getattr(settings, "SCALP_KLINES_LIMIT", 1000)))
+        return max(1, int(settings.CANDLE_LIMIT))
 
     def __init__(self):
         self._bars: Dict[str, deque] = {}   # keyed "SYMBOL|interval"
@@ -319,13 +342,15 @@ class WSKlineFeed:
             with self._lock:
                 bars = self._bars.get(key)
                 if bars is None:
-                    bars = deque(maxlen=self.MAX_BARS)
+                    # v5.31: cap is per-interval (1s keeps the full 1000-bar
+                    # scalp history; other intervals stay at 400)
+                    bars = deque(maxlen=self._maxlen_for(interval))
                     self._bars[key] = bars
                 if bars and bars[-1][0] == row[0]:
                     bars[-1] = row            # in-progress bar update
                 elif not bars or row[0] > bars[-1][0]:
                     bars.append(row)          # a new bar opened
-                    while len(bars) > self.MAX_BARS:
+                    while len(bars) > self._maxlen_for(interval):
                         bars.popleft()
                 self._last_event[key] = now
             self._last_msg_ts = now
@@ -365,7 +390,6 @@ class WSKlineFeed:
         now = time.monotonic()
         retry_after = max(60.0, float(getattr(
             settings, "WS_SEED_RETRY_AFTER_S", 1800)))
-        deep_min = max(1, int(settings.CANDLE_LIMIT))
         with self._lock:
             out = []
             for s in self._universe:
@@ -377,7 +401,8 @@ class WSKlineFeed:
                     if key in self._seed_short:
                         continue
                     bars = self._bars.get(key)
-                    if bars is None or len(bars) < deep_min:
+                    # v5.31: per-interval depth target (1s needs 1000, not 300)
+                    if bars is None or len(bars) < self._depth_target(iv):
                         out.append((s, iv))
             return out
 
@@ -432,14 +457,18 @@ class WSKlineFeed:
                     time.sleep(min(30.0, max(5.0, left)))
                     continue
                 try:
+                    # v5.31: fetch the interval's DEPTH TARGET (1s -> 1000),
+                    # not a flat CANDLE_LIMIT - the short-history mark must
+                    # mean "the consumer's read cannot be served yet".
+                    want = self._depth_target(interval)
                     df = DataFetcher._get_candles_rest(
-                        sym, interval, settings.CANDLE_LIMIT)
+                        sym, interval, want)
                     self.ingest(sym, df, interval=interval)
                     total_seeded += 1
                     # v5.24: history exhausted (brand-new listing returns
                     # fewer bars than asked) - remember so the sweep never
                     # re-fetches this key until the universe changes.
-                    if df is None or len(df) < int(settings.CANDLE_LIMIT):
+                    if df is None or len(df) < want:
                         with self._lock:
                             self._seed_short.add(key)
                 except RateLimitError:
@@ -490,8 +519,9 @@ class WSKlineFeed:
                     # v5.14: fetch CANDLE_LIMIT (300) - the old hardcoded 200
                     # left the cache permanently below get_cached(limit=300)'s
                     # depth check, forcing one wasted REST call per series.
+                    # v5.31: 1s keys refetch the full scalp depth (1000).
                     df = DataFetcher._get_candles_rest(
-                        sym, interval, settings.CANDLE_LIMIT)
+                        sym, interval, self._depth_target(interval))
                     self.ingest(sym, df, interval=interval)
                 except Exception:
                     continue
@@ -515,7 +545,7 @@ class WSKlineFeed:
             return
         try:
             rows = []
-            for ts, r in df.tail(self.MAX_BARS).iterrows():
+            for ts, r in df.tail(self._maxlen_for(interval)).iterrows():
                 # v5.24: close_time arrives as a pandas Timestamp (the df was
                 # already parsed) while live WS event rows carry int-ms.
                 # Storing the mixture made klines_to_df(unit='ms') RAISE on
@@ -540,7 +570,7 @@ class WSKlineFeed:
             with self._lock:
                 bars = self._bars.get(key)
                 if bars is None:
-                    bars = deque(maxlen=self.MAX_BARS)
+                    bars = deque(maxlen=self._maxlen_for(interval))
                     self._bars[key] = bars
                 bars.clear()
                 bars.extend(rows)
@@ -603,6 +633,24 @@ class WSKlineFeed:
         if not self._last_msg_ts:
             return False
         return (time.monotonic() - self._last_msg_ts) <= 120.0
+
+    def is_active(self) -> bool:
+        """v5.31: True when the feed is running (regardless of msg flow).
+
+        Callers use this to decide between 'serve from WS or SKIP (zero
+        REST)' and 'serve from WS or fall back to REST' - a running feed
+        that has not hydrated a key yet means the paced seeder is already
+        fetching it, so a REST retry would only duplicate the work.
+        """
+        return bool(settings.USE_WS_FEED and self._started and not self._stop)
+
+    def subscribed(self, symbol: str, interval: str = "1h") -> bool:
+        """v5.31: True when (symbol, interval) is part of the subscription
+        universe (its stream is live or will be on the next connect)."""
+        if interval not in self._intervals():
+            return False
+        with self._lock:
+            return symbol.upper().strip() in self._universe
 
     def coverage(self, symbols: Optional[list] = None,
                  intervals: Optional[list] = None) -> float:
