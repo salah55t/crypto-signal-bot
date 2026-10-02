@@ -30,6 +30,18 @@ STATE_FILE = Path("data/rate_state.json")
 # the server Retry-After fully (up to 24h) beats poking and EXTENDING the ban.
 COOLDOWN_HARD_CAP_S = 86400.0
 
+# v5.29 post-ban probe gate. Production 2026-10-02: a 1892s (escalated) 418
+# ban on the shared Render IP. When a LONG server ban expires we used to
+# release ALL callers at once (WS seeder + scalp tick + analysis cycle) into
+# an IP that Binance may have silently EXTENDED the ban on - and every
+# request sent during a ban extends it (the documented 598s -> 1892s
+# escalation loop). Now a long ban arms a PROBE requirement: after expiry
+# the first caller sends one weight-1 /time request; only a verified-clean
+# IP releases the herd. Priority traffic (position watch) bypasses the gate
+# so open positions are never left unmanaged.
+PROBE_SOURCES = frozenset({"418_ban", "429_retry", "restored", "probe_reject"})
+PROBE_MIN_S = 120.0          # bans shorter than this never arm the probe
+
 
 class RateLimitError(Exception):
     """Raised when a request cannot proceed within the rate budget."""
@@ -78,6 +90,11 @@ class WeightedRateLimiter:
         self._cooldown_until = 0.0  # monotonic ts
         self._pressure_streak = 0
         self._last_pressure_ts = 0.0
+        # v5.29: ban-source visibility + post-ban probe gate state
+        self._last_source = "none"
+        self._armed_total = 0       # fresh cooldown episodes this process
+        self._probe_required = False
+        self._probe_claimed = False
         # v5.15: restore a ban that was armed by a PREVIOUS process
         self._restore_from_disk()
 
@@ -125,6 +142,10 @@ class WeightedRateLimiter:
                 pass
             return
         self._cooldown_until = time.monotonic() + remaining
+        # v5.29: a restored ban is by definition a real server ban - the
+        # freshly restarted process must re-probe before releasing traffic.
+        self._last_source = "restored"
+        self._probe_required = True
         log.warning(
             f"[yellow]Rate limiter[/] restored cooldown from disk: "
             f"{remaining:.0f}s left (previous process armed a 429/418 "
@@ -149,8 +170,16 @@ class WeightedRateLimiter:
         v5.10: `priority=True` (position watch / dashboard / pending fills)
         may use the FULL budget; normal (bulk) traffic is capped at
         budget - priority_reserve so monitoring requests always fit.
+
+        v5.29: while a post-ban probe is pending, bulk traffic is refused
+        FAST (False immediately, no 90s wait) so a just-expired ban is not
+        re-poked by a thundering herd. Priority traffic still passes - it is
+        tiny, and a successful priority request clears the probe.
         """
         weight = max(1.0, float(weight))
+        # v5.29: probe gate - fail fast, the caller aborts its tick cleanly
+        if self._probe_required and not priority:
+            return False
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
             now = time.monotonic()
@@ -188,13 +217,20 @@ class WeightedRateLimiter:
             time.sleep(min(wait, 2.0))
 
     # ------------------------------------------------------------------
-    def trigger_cooldown(self, seconds: float) -> None:
+    def trigger_cooldown(self, seconds: float,
+                         source: str = "unknown") -> None:
         """Pause all outbound requests for `seconds` (429/418 backoff).
 
         v5.2: cap raised 120s -> 3600s so an IP auto-ban (418) can back off
         hard. Regular 429 paths still pass <= 120s from the client side.
         v5.3: log only on transition into cooldown or a meaningful escalation
         (>= 30s added) - repeated 10/20s re-arms stay silent.
+
+        v5.29: `source` records WHY the cooldown was armed ("418_ban",
+        "429_retry", "header_pressure", "restored", "probe_reject") for
+        /api/health visibility, and a real server ban of PROBE_MIN_S or
+        longer arms the post-ban probe gate. Header-pressure cooldowns
+        (<= 300s, neighbor-driven) never arm the probe.
         """
         # v5.15: cap raised 3600 -> 86400. Binance 418 Retry-After values can
         # exceed 1h for repeat offenders; re-poking after our (capped) cooldown
@@ -210,11 +246,21 @@ class WeightedRateLimiter:
             if until > self._cooldown_until:
                 self._cooldown_until = until
                 extended = True
+            if extended and not was_in_cooldown:
+                self._armed_total += 1
+            if source and source != "unknown":
+                self._last_source = source
+            # v5.29: arm the probe for real server bans (not pressure blips)
+            if (source in PROBE_SOURCES and seconds >= PROBE_MIN_S
+                    and extended):
+                self._probe_required = True
+                self._probe_claimed = False  # allow a fresh probe after expiry
         added = seconds - prev_remaining
         if extended and (not was_in_cooldown or added >= 30.0):
             log.warning(
                 f"[yellow]Rate limiter[/] global cooldown {seconds:.0f}s "
-                f"(server 429/418 or shared-IP pressure)"
+                f"(source: {self._last_source}; server 429/418 or "
+                f"shared-IP pressure)"
             )
         # v5.15: persist ONLY real extensions so a restart during a short
         # pressure blip does not inherit a stale ban.
@@ -255,6 +301,54 @@ class WeightedRateLimiter:
         return max(0.0, self._cooldown_until - time.monotonic())
 
     # ------------------------------------------------------------------
+    # v5.29: post-ban probe gate + ban-source visibility
+    # ------------------------------------------------------------------
+    def needs_probe(self) -> bool:
+        """True when a long ban expired but the IP is not yet verified."""
+        return self._probe_required and not self.in_cooldown()
+
+    def probe_pending(self) -> bool:
+        """Alias of needs_probe() for dashboard readability."""
+        return self.needs_probe()
+
+    def begin_probe(self) -> bool:
+        """Atomically claim the right to send the verification probe.
+
+        Exactly ONE caller may probe at a time; losers fail fast and retry
+        on their next scheduled tick.
+        """
+        with self._lock:
+            if not self._probe_required or self._probe_claimed:
+                return False
+            if self.in_cooldown():
+                return False
+            self._probe_claimed = True
+            return True
+
+    def finish_probe(self, success: bool) -> None:
+        """Resolve the in-flight probe.
+
+        success=True: the IP answered normally - release the herd.
+        success=False: the probe was rejected/errored (the client has
+        already re-armed a cooldown) - free the claim so the next tick can
+        try again after the new cooldown expires.
+        """
+        with self._lock:
+            self._probe_claimed = False
+            if success:
+                self._probe_required = False
+
+    def last_source(self) -> str:
+        """Why the last cooldown was armed (for /api/health)."""
+        with self._lock:
+            return self._last_source
+
+    def armed_total(self) -> int:
+        """Fresh cooldown episodes armed by THIS process."""
+        with self._lock:
+            return self._armed_total
+
+    # ------------------------------------------------------------------
     def note_server_weight(self, used: int) -> None:
         """
         Feed back the `X-MBX-USED-WEIGHT-1M` header. If the SHARED IP is
@@ -272,9 +366,11 @@ class WeightedRateLimiter:
         if used <= 0:
             return
         if used >= int(self.hard_ceiling * 0.95):
-            self.trigger_cooldown(self._register_pressure(30.0))
+            self.trigger_cooldown(self._register_pressure(30.0),
+                                  source="header_pressure")
         elif used >= int(self.hard_ceiling * 0.85):
-            self.trigger_cooldown(self._register_pressure(10.0))
+            self.trigger_cooldown(self._register_pressure(10.0),
+                                  source="header_pressure")
         elif used < int(self.hard_ceiling * self.LOW_WEIGHT_PCT):
             self._register_quiet()
 

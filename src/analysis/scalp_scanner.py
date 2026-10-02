@@ -20,6 +20,7 @@ Cost discipline (the bot lives on a shared Render IP with a 418 history):
     3-candle episode is still running.
 """
 import time
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -35,13 +36,27 @@ SCALP_SIGNALS_FILE = Path("data/scalp_signals.json")
 
 class ScalpScanner:
     """Scans true 15s/30s candles (from 1s klines) for the micro-scalp
-    strategy: BB 11/3 + SuperTrend 2/2, long-only, fixed 60s holding."""
+    strategy: BB 11/3 + SuperTrend 2/2, long-only, fixed 60s holding.
+
+    v5.29: the shortlist is ranked by the WS live-price move over the
+    speed window (movers first) BEFORE truncating to SCALP_TOP_N - the
+    1s-klines REST weight goes to symbols that are actually moving instead
+    of a static alphabetical head, cutting the channel's REST footprint
+    (15 x weight-5 per tick was the bot's largest recurring REST cost)
+    while IMPROVING candidate quality (the checklist needs bursts).
+    """
 
     def __init__(self):
         self._strategy = MicroScalpStrategy()
         # {symbol: ts of last fired signal} - burst dedup across ticks
         self._last_fired: Dict[str, float] = {}
         self._last_tick_stats: Dict = {}
+        # v5.29: zero-REST momentum ring - {symbol: deque[(ts, price)]}
+        # sampled from the WS live-price cache every tick (even when a rate
+        # ban or a seeding window skips the scan itself).
+        self._price_ring: Dict[str, deque] = {}
+        self._ring_window_s = float(max(120, settings.SCALP_SPEED_WINDOW_S))
+        self._ring_maxlen = max(8, int(self._ring_window_s / 30.0))
         log.info(
             "[cyan]ScalpScanner[/] initialized (micro_scalp: "
             f"BB {settings.SCALP_BB_PERIOD}/{settings.SCALP_BB_DEV:g} "
@@ -49,7 +64,7 @@ class ScalpScanner:
             f"{settings.SCALP_ST_MULT:g} on true "
             f"{settings.SCALP_TF_CALM}s/{settings.SCALP_TF_FAST}s candles "
             f"resampled from 1s, long-only, fixed "
-            f"{settings.SCALP_HOLD_SECONDS}s hold)")
+            f"{settings.SCALP_HOLD_SECONDS}s hold, WS-mover shortlist)")
 
     # ------------------------------------------------------------------
     def _symbol_on_cooldown(self, symbol: str) -> bool:
@@ -67,6 +82,81 @@ class ScalpScanner:
             return bool(st.get("seeding"))
         except Exception:
             return False
+
+    # ------------------------------------------------------------------
+    # v5.29: zero-REST momentum ring (WS live-price samples per tick)
+    # ------------------------------------------------------------------
+    def _sample_prices(self, symbols: List[str]) -> None:
+        """Sample the WS live-price cache into the per-symbol ring.
+
+        Pure in-memory: never fires a REST call, never raises, and keeps
+        sampling even while a rate ban or a seeding window skips the scan -
+        so the ring is already warm when scanning resumes.
+        """
+        try:
+            from src.core.ws_feed import ws_feed
+            prices = ws_feed.get_live_prices(symbols, max_age_s=180.0)
+        except Exception:
+            return
+        now = time.time()
+        for sym, price in (prices or {}).items():
+            try:
+                p = float(price)
+            except (TypeError, ValueError):
+                continue
+            if p <= 0:
+                continue
+            ring = self._price_ring.setdefault(
+                sym, deque(maxlen=self._ring_maxlen))
+            ring.append((now, p))
+        # bound the dict (delisted symbols never return prices again)
+        if len(self._price_ring) > 400:
+            for sym in list(self._price_ring):
+                if sym not in prices:
+                    self._price_ring.pop(sym, None)
+
+    def _move_pct(self, symbol: str) -> Optional[float]:
+        """Signed % move over the ring window (None when coverage is thin).
+
+        Requires >= 2 samples spanning >= half the window - a cold process
+        or a stale WS feed yields None and the symbol keeps legacy order.
+        """
+        ring = self._price_ring.get(symbol)
+        if not ring:
+            return None
+        now = time.time()
+        horizon = now - self._ring_window_s
+        fresh = [(ts, p) for (ts, p) in ring if ts >= horizon]
+        if len(fresh) < 2:
+            return None
+        span = fresh[-1][0] - fresh[0][0]
+        if span < self._ring_window_s * 0.5:
+            return None
+        p0, p1 = fresh[0][1], fresh[-1][1]
+        if p0 <= 0:
+            return None
+        return (p1 - p0) / p0 * 100.0
+
+    def _rank_shortlist(self, shortlist: List[str]) -> List[str]:
+        """Movers first (WS price move over the speed window).
+
+        LONG-ONLY channel: a dumping symbol can never fire the green-run
+        checklist, so negative movers rank below flat/unknown ones and only
+        POSITIVE movers jump the queue. With no ring data (cold boot, WS
+        down) the original order is kept unchanged.
+        """
+        known = []
+        unknown = []
+        for sym in shortlist:
+            mv = self._move_pct(sym)
+            if mv is None:
+                unknown.append(sym)
+            else:
+                known.append((max(mv, 0.0), sym))
+        if not known:
+            return shortlist
+        known.sort(key=lambda t: -t[0])  # stable sort: ties keep order
+        return [sym for _, sym in known] + unknown
 
     # ------------------------------------------------------------------
     def scan(self, symbols: Optional[List[str]] = None,
@@ -95,12 +185,17 @@ class ScalpScanner:
             symbols = analyzer.symbols
         shortlist = [s for s in (symbols or [])
                      if not self._symbol_on_cooldown(s)]
-        shortlist = shortlist[:max(1, settings.SCALP_TOP_N)]
+        # v5.29: rank by the WS price move BEFORE truncating - REST weight
+        # goes to symbols actually moving, not to a static list head.
+        ranked = self._rank_shortlist(shortlist)
+        shortlist = ranked[:max(1, settings.SCALP_TOP_N)]
         if not shortlist:
             return []
 
+        n_movers = sum(1 for s in shortlist if self._move_pct(s) is not None)
         log.info(
-            f"[cyan]Scalp scanning[/] {len(shortlist)} symbols on true "
+            f"[cyan]Scalp scanning[/] {len(shortlist)} symbols "
+            f"({n_movers} WS-ranked movers) on true "
             f"{settings.SCALP_TF_CALM}s/{settings.SCALP_TF_FAST}s candles "
             f"(1s klines, micro_scalp)...")
         start = time.time()
@@ -197,6 +292,14 @@ class ScalpScanner:
         Returns the number of positions opened."""
         if not settings.SCALP_ENABLED:
             return 0
+        # v5.29: sample WS prices BEFORE any skip - the momentum ring must
+        # keep filling even while a rate ban or a seeding window skips the
+        # scan, so the shortlist is already warm when scanning resumes.
+        try:
+            from src.analysis.analyzer import analyzer
+            self._sample_prices(analyzer.symbols)
+        except Exception:
+            pass
         candidates = self.scan()
         if not candidates:
             return 0
