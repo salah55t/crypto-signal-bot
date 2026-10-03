@@ -114,6 +114,13 @@ class BinanceClient:
         self._proxy_state_lock = threading.Lock()
         self._proxy_retry_s = float(
             getattr(settings, "BINANCE_PROXY_RETRY_S", 300.0))
+        # v5.33.1: tunable probe timeout - a COLD userspace-WireGuard first
+        # handshake (often via DERP relays across continents) can need well
+        # over the historical hard-coded 6s, which flapped the route exactly
+        # at boot when it mattered most.
+        self._probe_timeout_s = float(
+            getattr(settings, "BINANCE_PROXY_PROBE_TIMEOUT_S", 6.0))
+        self._bg_probe_thread: Optional[threading.Thread] = None
         if self._proxy_url:
             # never log the URL (may embed credentials) - state its presence
             log.info(
@@ -144,6 +151,8 @@ class BinanceClient:
             f"Public URL: {self.base_url} | "
             f"Signed URL: {self.signed_url}"
         )
+        # v5.33.1: optional background route keeper (gated, off in tests)
+        self._start_bg_probe()
 
     # ------------------------------------------------------------------
     # v5.33: managed proxy route (phone bridge) - health + direct fallback
@@ -182,10 +191,15 @@ class BinanceClient:
         """One weight-0 /ping THROUGH the proxy to test reachability."""
         try:
             response = self.session.get(
-                f"{self.base_url}/api/v3/ping", timeout=6, proxies={
+                f"{self.base_url}/api/v3/ping",
+                timeout=self._probe_timeout_s, proxies={
                     "http": self._proxy_url, "https": self._proxy_url})
             return response.status_code == 200
-        except Exception:
+        except Exception as exc:
+            # keep a generous cause slice for /api/health - a 120-char cut
+            # hides the difference between 'cold tunnel timeout' and
+            # 'listener down', which demand different fixes
+            self._proxy_fail_reason = f"probe: {exc}"[:400]
             return False
 
     def _route(self, method: str, url: str, **kwargs):
@@ -205,7 +219,7 @@ class BinanceClient:
                 raise
             with self._proxy_state_lock:
                 self._proxy_healthy = False
-                self._proxy_fail_reason = str(exc)[:120]
+                self._proxy_fail_reason = str(exc)[:400]
                 self._proxy_retry_at = (time.monotonic()
                                         + self._proxy_retry_s)
             log.warning(
@@ -230,6 +244,64 @@ class BinanceClient:
                                if not self._proxy_healthy else 0),
                 "last_fail_reason": self._proxy_fail_reason,
             }
+
+    # ------------------------------------------------------------------
+    # v5.33.1: background route keeper - heal the bridge with zero traffic
+    # ------------------------------------------------------------------
+    def _start_bg_probe(self) -> None:
+        """Spawn the route-keeper daemon when enabled.
+
+        Gated by BINANCE_PROXY_BG_PROBE (default off so tests and non-
+        bridge deployments run thread-free; scripts/render/start.sh turns
+        it on for the phone-bridge deployment).
+        """
+        if not self._proxy_url or not bool(
+                getattr(settings, "BINANCE_PROXY_BG_PROBE", False)):
+            return
+        self._bg_probe_thread = threading.Thread(
+            target=self._bg_probe_loop, name="binance-proxy-probe",
+            daemon=True)
+        self._bg_probe_thread.start()
+
+    def _bg_probe_loop(self) -> None:
+        tick_s = float(
+            getattr(settings, "BINANCE_PROXY_BG_PROBE_TICK_S", 60.0))
+        # boot warm-up: settle the cold-tunnel question NOW so the first
+        # real call either rides a verified warm phone route or parks
+        # direct - instead of dying through a half-open tunnel.
+        self._bg_probe_tick(force=True)
+        while True:
+            time.sleep(tick_s)
+            self._bg_probe_tick()
+
+    def _bg_probe_tick(self, force: bool = False) -> bool:
+        """One conditional re-probe under the state lock; True iff the
+        route is (now) healthy.
+
+        Without force: probe ONLY when marked down AND the retry window
+        has elapsed - never stampede an unreachable phone, never disturb
+        a healthy route. This is what keeps the bridge alive while the
+        bot is parked in a zero-REST 418 cooldown, where the in-band lazy
+        re-probe of _effective_proxies() never gets a caller.
+        """
+        with self._proxy_state_lock:
+            if not force:
+                if self._proxy_healthy:
+                    return True
+                if time.monotonic() < self._proxy_retry_at:
+                    return False
+            if self._probe_proxy():
+                self._proxy_healthy = True
+                self._proxy_fail_reason = None
+                self._proxy_retry_at = 0.0
+                log.info(
+                    "[cyan]BinanceClient[/] proxy route RESTORED (bg) - "
+                    "egress back via the phone bridge"
+                )
+                return True
+            self._proxy_healthy = False
+            self._proxy_retry_at = time.monotonic() + self._proxy_retry_s
+            return False
 
     # ------------------------------------------------------------------
     # v5.29: post-ban verification probe

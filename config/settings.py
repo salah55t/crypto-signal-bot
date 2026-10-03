@@ -44,6 +44,20 @@ class Settings:
     # bot alive 24/7 while enjoying the phone's clean personal IP whenever
     # the phone is up.
     BINANCE_PROXY_RETRY_S: float = float(os.getenv("BINANCE_PROXY_RETRY_S", "300"))
+    # v5.33.1: /ping probe timeout through the tunnel. A COLD userspace
+    # WireGuard first handshake (often via DERP relays across continents,
+    # e.g. Render-singapore <-> phone-Algeria) can need well over the
+    # historical hard-coded 6s - a too-tight probe flaps the route at boot.
+    BINANCE_PROXY_PROBE_TIMEOUT_S: float = float(os.getenv("BINANCE_PROXY_PROBE_TIMEOUT_S", "6"))
+    # v5.33.1: background route keeper. While parked in a 418 cooldown the
+    # bot makes ZERO REST calls, so the lazy in-band re-probe never fires
+    # and a healed phone route stays dormant until the cooldown expires.
+    # With this on, a daemon thread settles the route once at boot
+    # (warm-up) then re-probes on schedule - /api/health stays honest and
+    # the bridge self-heals with zero traffic. Default off (tests);
+    # scripts/render/start.sh enables it for the bridge deployment.
+    BINANCE_PROXY_BG_PROBE: bool = os.getenv("BINANCE_PROXY_BG_PROBE", "false").lower() == "true"
+    BINANCE_PROXY_BG_PROBE_TICK_S: float = float(os.getenv("BINANCE_PROXY_BG_PROBE_TICK_S", "60"))
     BINANCE_TESTNET: bool = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
     USE_PUBLIC_ONLY: bool = not BINANCE_API_KEY or not BINANCE_API_SECRET
 
