@@ -100,7 +100,7 @@ def test_418_triggers_hard_backoff(monkeypatch):
     c = _client()
     monkeypatch.setattr(rate_limiter, "_cooldown_until", 0.0)  # clean state
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(url, params=None, timeout=None, **kwargs):
         return _FakeResponse(418, headers={"Retry-After": "30"}, text="banned")
 
     monkeypatch.setattr(c.session, "get", fake_get)
@@ -114,7 +114,7 @@ def test_429_keeps_short_backoff(monkeypatch):
     c = _client()
     monkeypatch.setattr(rate_limiter, "_cooldown_until", 0.0)
 
-    def fake_get(url, params=None, timeout=None):
+    def fake_get(url, params=None, timeout=None, **kwargs):
         return _FakeResponse(429, headers={"Retry-After": "10"}, text="slow down")
 
     monkeypatch.setattr(c.session, "get", fake_get)

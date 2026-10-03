@@ -36,8 +36,16 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
+      # v5.33: Tailscale userspace binaries - lets the service reach the
+      # user's phone (exit-node bridge = personal clean Binance IP).
+      # Non-fatal: if the fetch fails the bot still runs direct-only.
+      (curl -sSL https://pkgs.tailscale.com/stable/tailscale_1.84.0_amd64.tgz -o /tmp/ts.tgz \
+        && tar -xzf /tmp/ts.tgz -C /tmp \
+        && cp /tmp/tailscale_1.84.0_amd64/tailscale /tmp/tailscale_1.84.0_amd64/tailscaled . \
+        && chmod +x tailscale tailscaled) \
+        || echo "tailscale fetch failed - running direct-only"
     startCommand: |
-      uvicorn src.web.app:app --host 0.0.0.0 --port $PORT --workers 1
+      bash scripts/render/start.sh
     healthCheckPath: /api/health
     autoDeploy: true
     numInstances: 1
@@ -185,6 +193,18 @@ services:
       # Signed URL (for placing orders) - must be api.binance.com or testnet
       - key: BINANCE_SIGNED_URL
         value: https://api.binance.com
+      # === v5.33 phone bridge (Tailscale exit-node) ===
+      # Personal clean egress for Binance REST. Set in the dashboard:
+      #   BINANCE_PROXY_URL = socks5h://127.0.0.1:1055 (tailscaled userspace hop)
+      #   TS_AUTHKEY        = Tailscale auth key (admin console -> Keys)
+      #   TS_EXIT_NODE      = the phone's tailnet name or 100.x.y.z IP
+      # All three optional: empty = direct egress as before.
+      - key: BINANCE_PROXY_URL
+        sync: false
+      - key: TS_AUTHKEY
+        sync: false
+      - key: TS_EXIT_NODE
+        sync: false
       - key: BINANCE_TESTNET
         value: "false"
 

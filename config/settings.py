@@ -38,6 +38,12 @@ class Settings:
     # Point it at a proxy with a DEDICATED IP (squid/tinyproxy on a cheap
     # VPS). Empty = direct connection (default). WS feed is unaffected.
     BINANCE_PROXY_URL: str = os.getenv("BINANCE_PROXY_URL", "")
+    # v5.33: phone-bridge resilience - when the proxy (the user's phone via
+    # Tailscale exit-node) is unreachable (asleep/offline), REST rides DIRECT
+    # for this long before a single in-band re-probe is allowed. Keeps the
+    # bot alive 24/7 while enjoying the phone's clean personal IP whenever
+    # the phone is up.
+    BINANCE_PROXY_RETRY_S: float = float(os.getenv("BINANCE_PROXY_RETRY_S", "300"))
     BINANCE_TESTNET: bool = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
     USE_PUBLIC_ONLY: bool = not BINANCE_API_KEY or not BINANCE_API_SECRET
 
