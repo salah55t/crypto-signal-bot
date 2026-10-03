@@ -258,3 +258,99 @@ def test_health_exposes_phone_bridge_state(rl, monkeypatch):
         "configured": True, "scheme": "socks5h", "healthy": True,
         "using": "proxy", "retry_in_s": 0, "last_fail_reason": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# v5.33.1: background route keeper - zero-traffic self-heal.
+# Production lesson: while parked in a 418 cooldown the bot makes ZERO REST
+# calls, so the in-band lazy re-probe never fires and a healed phone route
+# stays dormant (using=direct-fallback, retry_in_s=0) until the cooldown
+# expires. The keeper settles the route at boot (warm-up) and re-probes on
+# schedule - both semantics tested here synchronously (no threads).
+# ---------------------------------------------------------------------------
+
+def test_bg_boot_warmup_failure_parks_route_honestly(client):
+    """A cold tunnel that fails the boot probe must park DIRECT up-front -
+    the first real call must never die through a half-open tunnel."""
+    bc_mod, cl = client
+    cl.session = FakeSession(_conn_err)          # boot probe fails
+    assert cl._bg_probe_tick(force=True) is False
+    st = cl.proxy_state()
+    assert st["using"] == "direct-fallback"
+    assert 0 < st["retry_in_s"] <= 300           # window armed BEFORE traffic
+    assert "phone asleep" in st["last_fail_reason"]
+    # the armed window shields the first real call: straight direct,
+    # zero proxy dials wasted
+    cl.session = FakeSession(_resp())
+    cl._route("get", "https://x/api/v3/klines")
+    assert len(cl.session.calls) == 1
+    assert cl.session.calls[0][2] is None
+
+
+def test_bg_boot_warmup_success_confirms_warm_route(client):
+    bc_mod, cl = client
+    cl.session = FakeSession(_resp())
+    assert cl._bg_probe_tick(force=True) is True
+    assert cl.session.calls[0][1].endswith("/api/v3/ping")
+    assert cl.session.calls[0][2] == ROUTE
+    st = cl.proxy_state()
+    assert st["using"] == "proxy" and st["healthy"] is True
+
+
+def test_bg_tick_noop_when_healthy(client):
+    """Healthy routes cost NOTHING - no pings, no weight, no dials."""
+    bc_mod, cl = client
+    cl.session = FakeSession(_resp())
+    assert cl._bg_probe_tick() is True
+    assert len(cl.session.calls) == 0
+
+
+def test_bg_tick_respects_retry_window(client):
+    """Window open -> never stampede an unreachable phone."""
+    bc_mod, cl = client
+    _mark_down(cl, window_elapsed=False)
+    cl.session = FakeSession(_resp())
+    assert cl._bg_probe_tick() is False
+    assert len(cl.session.calls) == 0
+
+
+def test_bg_tick_restores_route_after_window(client):
+    """The parked-bot healer: window elapsed + phone back -> route flips
+    with ZERO REST traffic - exactly what the cooldown case needs."""
+    bc_mod, cl = client
+    _mark_down(cl, window_elapsed=True)
+    cl.session = FakeSession(_resp(200))
+    assert cl._bg_probe_tick() is True
+    st = cl.proxy_state()
+    assert st["using"] == "proxy" and st["healthy"] is True
+    assert st["last_fail_reason"] is None and st["retry_in_s"] == 0
+
+
+def test_bg_tick_failure_rearms_window(client):
+    bc_mod, cl = client
+    _mark_down(cl, window_elapsed=True)
+    cl.session = FakeSession(_conn_err)
+    assert cl._bg_probe_tick() is False
+    st = cl.proxy_state()
+    assert st["using"] == "direct-fallback"
+    assert 0 < st["retry_in_s"] <= 300           # window re-armed
+
+
+def test_bg_thread_gated_off_by_default(client):
+    """Tests/non-bridge deployments must stay thread-free: the keeper only
+    spawns when BINANCE_PROXY_BG_PROBE is explicitly enabled."""
+    from config.settings import settings
+    bc_mod, cl = client
+    assert settings.BINANCE_PROXY_BG_PROBE is False
+    cl._start_bg_probe()
+    assert cl._bg_probe_thread is None
+
+
+def test_probe_timeout_is_tunable(client, monkeypatch):
+    """Cold DERP handshakes need >6s - the timeout is a setting now."""
+    from config.settings import settings
+    bc_mod, cl = client
+    monkeypatch.setattr(settings, "BINANCE_PROXY_PROBE_TIMEOUT_S", 15.0)
+    cl2 = bc_mod.BinanceClient()
+    assert cl2._probe_timeout_s == 15.0
+    assert cl._probe_timeout_s == 6.0            # default unchanged

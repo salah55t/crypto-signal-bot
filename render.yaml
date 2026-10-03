@@ -199,6 +199,11 @@ services:
       #   TS_AUTHKEY        = Tailscale auth key (admin console -> Keys)
       #   TS_EXIT_NODE      = the phone's tailnet name or 100.x.y.z IP
       # All three optional: empty = direct egress as before.
+      # v5.33.1: when the bridge is on, start.sh auto-enables the
+      # background route keeper (BINANCE_PROXY_BG_PROBE=true) and a 15s
+      # probe timeout (BINANCE_PROXY_PROBE_TIMEOUT_S) so the route
+      # settles at boot and self-heals even during zero-REST cooldowns.
+      # Override in the dashboard if you know better.
       - key: BINANCE_PROXY_URL
         sync: false
       - key: TS_AUTHKEY

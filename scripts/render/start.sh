@@ -27,6 +27,13 @@ if [ -f ./tailscaled ] && [ -n "${TS_AUTHKEY:-}" ]; then
     --socket=ts_state/tailscaled.sock \
     --port=0 >/tmp/tailscaled.log 2>&1 &
 
+  # v5.33.1: when the bridge is on, keep the route honest with zero
+  # traffic: boot warm-up probe + scheduled re-probe while parked in a
+  # 418 cooldown (the in-band lazy re-probe never fires with no callers).
+  # Longer probe timeout: cold DERP-relayed handshakes need >6s.
+  export BINANCE_PROXY_BG_PROBE="${BINANCE_PROXY_BG_PROBE:-true}"
+  export BINANCE_PROXY_PROBE_TIMEOUT_S="${BINANCE_PROXY_PROBE_TIMEOUT_S:-15}"
+
   UP_ARGS="--authkey=${TS_AUTHKEY} --hostname=crypto-bot-render"
   if [ -n "${TS_EXIT_NODE:-}" ]; then
     UP_ARGS="${UP_ARGS} --exit-node=${TS_EXIT_NODE}"
