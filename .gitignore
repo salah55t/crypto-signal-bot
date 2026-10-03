@@ -72,3 +72,7 @@ Thumbs.db
 htmlcov/
 telegram_state.json
 scalp_signals.json
+
+# v5.33: tailscale userspace daemon state (ephemeral, re-auths each deploy)
+ts_state/
+*.sock

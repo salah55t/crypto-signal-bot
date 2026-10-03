@@ -246,6 +246,9 @@ async def health():
             # WS_INTERVALS takeover this should sit near zero; a path that
             # keeps showing up is the next ban-risk to convert to WS.
             rate_state["rest_spend_1h"] = binance_client.rest_spend(3600.0)
+            # v5.33: phone-bridge route visibility - which egress REST is
+            # riding right now (proxy / direct-fallback / direct).
+            rate_state["binance_proxy"] = binance_client.proxy_state()
         except Exception:
             pass
         # v5.24: gate transparency - consecutive skipped ticks (cooldown

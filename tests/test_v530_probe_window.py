@@ -114,17 +114,25 @@ def test_gap_fill_rest_returns_after_probe_clears(rl, no_ws, monkeypatch):
 
 
 def test_proxy_escape_hatch_wires_dedicated_egress(rl, monkeypatch):
+    # v5.33 contract: the proxy is a MANAGED ROUTE (per-request proxies +
+    # health state), no longer baked into session.proxies - the session
+    # stays clean so every call site routes through _route().
     from config.settings import settings
     bc_mod = _mod("src.core.binance_client")
 
     monkeypatch.setattr(settings, "BINANCE_PROXY_URL",
                         "http://user:pass@203.0.113.7:3128")
     cl = bc_mod.BinanceClient()
-    assert cl.session.proxies == {
+    assert cl._proxy_url == "http://user:pass@203.0.113.7:3128"
+    assert not cl.session.proxies  # session stays clean (per-request route)
+    assert cl._effective_proxies() == {
         "http": "http://user:pass@203.0.113.7:3128",
         "https": "http://user:pass@203.0.113.7:3128",
     }
+    assert cl.proxy_state()["using"] == "proxy"
 
     monkeypatch.setattr(settings, "BINANCE_PROXY_URL", "")
     cl_direct = bc_mod.BinanceClient()
     assert not cl_direct.session.proxies  # default: direct connection
+    assert cl_direct._effective_proxies() is None
+    assert cl_direct.proxy_state() == {"configured": False, "using": "direct"}

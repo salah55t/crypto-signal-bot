@@ -98,16 +98,28 @@ class BinanceClient:
         # v5.30: optional egress escape hatch. Render free-tier egress IPs
         # are SHARED with other services' traffic ("the herd") - when the
         # herd alone keeps triggering 418 bans, routing REST through a
-        # private proxy with a dedicated IP (tinyproxy/squid on a cheap
-        # VPS, BINANCE_PROXY_URL) ends the ban cycle permanently. Empty
+        # proxy with a dedicated IP ends the ban cycle permanently. Empty
         # default = direct connection; the WS feed is unaffected either way.
-        proxy_url = getattr(settings, "BINANCE_PROXY_URL", "")
-        if proxy_url:
-            self.session.proxies = {"http": proxy_url, "https": proxy_url}
+        # v5.33: the proxy is now a MANAGED ROUTE (the "phone bridge") with
+        # per-request health: if the phone (Tailscale exit-node) is asleep
+        # or offline, transport-level failures transparently fall back to
+        # DIRECT egress for BINANCE_PROXY_RETRY_S, then one in-band re-probe
+        # flips the route back when the phone returns. Ban responses
+        # (418/429) are NOT transport errors and NEVER flip the route - a
+        # banned phone IP must not poison the shared one.
+        self._proxy_url = getattr(settings, "BINANCE_PROXY_URL", "")
+        self._proxy_healthy = True
+        self._proxy_retry_at = 0.0
+        self._proxy_fail_reason: Optional[str] = None
+        self._proxy_state_lock = threading.Lock()
+        self._proxy_retry_s = float(
+            getattr(settings, "BINANCE_PROXY_RETRY_S", 300.0))
+        if self._proxy_url:
             # never log the URL (may embed credentials) - state its presence
             log.info(
-                f"[cyan]BinanceClient[/] REST egress routed via proxy "
-                f"({proxy_url.split('://', 1)[0]} scheme, dedicated IP)"
+                f"[cyan]BinanceClient[/] REST egress routed via managed proxy "
+                f"route ({self._proxy_url.split('://', 1)[0]} scheme, "
+                f"direct-fallback after {self._proxy_retry_s:.0f}s down)"
             )
         # v5.14: process-lifetime REST request counter (health endpoint
         # visibility for the WS-first weight reduction).
@@ -134,6 +146,92 @@ class BinanceClient:
         )
 
     # ------------------------------------------------------------------
+    # v5.33: managed proxy route (phone bridge) - health + direct fallback
+    # ------------------------------------------------------------------
+    def _effective_proxies(self) -> Optional[Dict[str, str]]:
+        """Per-request proxy mapping for the CURRENT route.
+
+        Returns None = direct egress. When the proxy is configured but
+        marked unhealthy, traffic rides direct until the retry window
+        elapses; the first caller past the window runs one in-band
+        re-probe (weight-0 /ping through the proxy, 6s timeout) and flips
+        the route back on success. The state lock serializes the re-probe
+        so concurrent callers cannot stampede an unreachable phone.
+        """
+        if not self._proxy_url:
+            return None
+        route = {"http": self._proxy_url, "https": self._proxy_url}
+        with self._proxy_state_lock:
+            if self._proxy_healthy:
+                return route
+            if time.monotonic() < self._proxy_retry_at:
+                return None
+            if self._probe_proxy():
+                self._proxy_healthy = True
+                self._proxy_fail_reason = None
+                self._proxy_retry_at = 0.0
+                log.info(
+                    "[cyan]BinanceClient[/] proxy route RESTORED - "
+                    "egress back via the phone bridge"
+                )
+                return route
+            self._proxy_retry_at = time.monotonic() + self._proxy_retry_s
+            return None
+
+    def _probe_proxy(self) -> bool:
+        """One weight-0 /ping THROUGH the proxy to test reachability."""
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/v3/ping", timeout=6, proxies={
+                    "http": self._proxy_url, "https": self._proxy_url})
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _route(self, method: str, url: str, **kwargs):
+        """session.get/post through the managed route, with ONE direct
+        retry when the proxy itself is unreachable (transport-level errors
+        only). 418/429 ban responses are not transport errors and never
+        flip the route - a banned phone IP must not poison the shared one.
+        """
+        proxies = self._effective_proxies()
+        used_proxy = proxies is not None
+        try:
+            return getattr(self.session, method)(url, proxies=proxies,
+                                                 **kwargs)
+        except (requests.exceptions.ProxyError,
+                requests.exceptions.ConnectionError) as exc:
+            if not used_proxy:
+                raise
+            with self._proxy_state_lock:
+                self._proxy_healthy = False
+                self._proxy_fail_reason = str(exc)[:120]
+                self._proxy_retry_at = (time.monotonic()
+                                        + self._proxy_retry_s)
+            log.warning(
+                "[yellow]BinanceClient[/] proxy route UNREACHABLE - "
+                f"falling back to DIRECT egress for "
+                f"{self._proxy_retry_s:.0f}s (phone asleep/offline?)"
+            )
+            return getattr(self.session, method)(url, proxies=None, **kwargs)
+
+    def proxy_state(self) -> Dict[str, Any]:
+        """/api/health visibility: which route REST is currently riding."""
+        with self._proxy_state_lock:
+            if not self._proxy_url:
+                return {"configured": False, "using": "direct"}
+            return {
+                "configured": True,
+                "scheme": self._proxy_url.split("://", 1)[0],
+                "healthy": self._proxy_healthy,
+                "using": "proxy" if self._proxy_healthy else "direct-fallback",
+                "retry_in_s": (max(0, round(self._proxy_retry_at
+                                            - time.monotonic()))
+                               if not self._proxy_healthy else 0),
+                "last_fail_reason": self._proxy_fail_reason,
+            }
+
+    # ------------------------------------------------------------------
     # v5.29: post-ban verification probe
     # ------------------------------------------------------------------
     def _send_probe(self) -> bool:
@@ -151,8 +249,10 @@ class BinanceClient:
                 rate_limiter.finish_probe(False)
                 return False
             self.request_count += 1
-            response = self.session.get(
-                f"{self.base_url}/api/v3/time", timeout=10)
+            # v5.33: route-consistent - the probe verifies whichever route
+            # (phone bridge or direct) is currently active.
+            response = self._route(
+                "get", f"{self.base_url}/api/v3/time", timeout=10)
             used = response.headers.get("X-MBX-USED-WEIGHT-1M")
             if used:
                 rate_limiter.note_server_weight(used)
@@ -247,7 +347,8 @@ class BinanceClient:
                 self._spend.popleft()
 
         try:
-            response = self.session.get(url, params=params, timeout=15)
+            # v5.33: managed route (phone bridge + direct fallback)
+            response = self._route("get", url, params=params, timeout=15)
             # Feed the server-reported shared-IP usage back into the limiter
             used = response.headers.get("X-MBX-USED-WEIGHT-1M")
             if used:
@@ -470,7 +571,8 @@ class BinanceClient:
                 f"Rate budget exhausted before POST {path}"
             )
         try:
-            response = self.session.post(url, params=params, timeout=15)
+            # v5.33: managed route (phone bridge + direct fallback)
+            response = self._route("post", url, params=params, timeout=15)
             used = response.headers.get("X-MBX-USED-WEIGHT-1M")
             if used:
                 rate_limiter.note_server_weight(used)
